@@ -1,0 +1,9 @@
+scripts/shots/
+node_modules/
+.vercel
+.env*
+storage/
+graphify-out/
+CREDENCIALES_ALFATRACK.txt
+CREDENCIALES_USUARIOS.md
+

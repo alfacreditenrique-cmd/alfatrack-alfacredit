@@ -1,0 +1,9 @@
+node_modules
+scripts
+storage
+.git
+test
+graphify-out
+CREDENCIALES_ALFATRACK.txt
+CREDENCIALES_USUARIOS.md
+README.md
