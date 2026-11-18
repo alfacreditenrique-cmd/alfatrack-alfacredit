@@ -217,7 +217,7 @@ try {
   await shot('09-promotora-laura', 390, 844, true);
 
   // 10. Navigate directly to /turso -> verify Turso Web Database Manager loads directly for Admin without any JWT error
-  const tursoUrl = targetUrl.replace(/\/index\.html$/, '/turso');
+  const tursoUrl = targetUrl.replace(/\/index\.html$/, '').replace(/\/+$/, '') + '/turso';
   await send('Page.navigate', { url: tursoUrl }); await sleep(1200);
   r = await ev(H + `
     loginAs('admin', 'admin123');
