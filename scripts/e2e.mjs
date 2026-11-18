@@ -188,12 +188,12 @@ try {
   r = await ev(H + `
     click('.tabs button', 'Base de Datos');
     click('[data-action=db-ver-tabla]', 'Explorar tabla');
-    await new Promise(r => setTimeout(r, 400));
+    for (let i = 0; i < 20 && !$('#app').textContent.includes('Explorador de Tabla SQL'); i++) await new Promise(r => setTimeout(r, 150));
     const hasTable = $('#app').textContent.includes('Explorador de Tabla SQL');
     const sqlForm = $('form[data-form=db-sql]');
     set(sqlForm.sql, 'SELECT username, rol, sucursal FROM alfatrack_usuarios LIMIT 5');
     sqlForm.requestSubmit();
-    await new Promise(r => setTimeout(r, 400));
+    for (let i = 0; i < 20 && !$('#app').textContent.includes('Consulta ejecutada'); i++) await new Promise(r => setTimeout(r, 150));
     const hasSqlRes = $('#app').textContent.includes('Consulta ejecutada');
     click('.tabs button', 'Depurador CSV');
     click('[data-action=csv-ejemplo]');
