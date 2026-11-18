@@ -77,17 +77,29 @@ try {
 
   await shot('01-login-clean', 390, 844, true);
 
-  // 0. Verify clean login screen: no credentials table, no quick-login buttons, no #sel-rol/#sel-user demo switcher
+  // 0. Verify clean login screen: no credentials table, no quick-login buttons, no #sel-rol/#sel-user demo switcher, and password visibility toggle preserves typed inputs
   let r = await ev(H + `
+    const lf = $('form[data-form=login]');
+    set(lf.username, 'admin');
+    set(lf.password, 'secret123');
+    const toggleBtn = $('[data-action=toggle-login-pwd]');
+    toggleBtn.click();
+    const preservedAfterShow = lf.username.value === 'admin' && lf.password.value === 'secret123' && lf.password.type === 'text';
+    toggleBtn.click();
+    const preservedAfterHide = lf.username.value === 'admin' && lf.password.value === 'secret123' && lf.password.type === 'password';
+    set(lf.username, '');
+    set(lf.password, '');
     return {
-      hasLoginForm: !!$('form[data-form=login]'),
+      hasLoginForm: !!lf,
       hasSelRol: !!$('#sel-rol'),
       hasSelUser: !!$('#sel-user'),
       hasQuickLogin: !!$('[data-action=quick-login]'),
       hasCredTable: $$('.login-wrap table').length,
+      preservedAfterShow,
+      preservedAfterHide,
       bodyTxt: document.body.textContent,
     };`);
-  assert.ok(r.hasLoginForm && !r.hasSelRol && !r.hasSelUser && !r.hasQuickLogin && r.hasCredTable === 0, JSON.stringify(r));
+  assert.ok(r.hasLoginForm && !r.hasSelRol && !r.hasSelUser && !r.hasQuickLogin && r.hasCredTable === 0 && r.preservedAfterShow && r.preservedAfterHide, JSON.stringify(r));
   assert.ok(!/admin123|Directorio Oficial de Usuarios/i.test(r.bodyTxt), 'No credentials leaked on login screen');
 
   // 1. Official Promotor (Fanny Ramírez — Masaya: fanny.ramirez / fanny123) logs in and registers; duplicate is blocked

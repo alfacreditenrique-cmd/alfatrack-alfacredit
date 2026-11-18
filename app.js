@@ -456,8 +456,8 @@
           </label>
           <label>Contraseña *
             <div class="pwd-row">
-              <input name="password" id="login-password" type="${ui.showPasswords ? 'text' : 'password'}" required placeholder="Ingresa tu contraseña" autocomplete="current-password">
-              <button type="button" class="btn sm ghost" data-action="toggle-show-pwd">${ui.showPasswords ? '🙈 Ocultar' : '👁️ Ver'}</button>
+              <input name="password" id="login-password" type="password" required placeholder="Ingresa tu contraseña" autocomplete="current-password">
+              <button type="button" class="btn sm ghost" data-action="toggle-login-pwd">👁️ Ver</button>
             </div>
           </label>
           <button class="btn primary block" type="submit">🔐 ${dbRoute ? 'Ingresar al Gestor de Base de Datos Turso' : 'Iniciar Sesión'}</button>
@@ -1192,6 +1192,16 @@
       case 'usuario': ui.modal = { type: 'usuario', id }; render(); break;
       case 'mi-clave': ui.modal = { type: 'mi-clave' }; render(); break;
       case 'logout': logoutSession(); toast('Sesión cerrada correctamente.', 'info'); break;
+      case 'toggle-login-pwd': {
+        const inp = $('#login-password');
+        if (inp) {
+          const isPwd = inp.type === 'password';
+          inp.type = isPwd ? 'text' : 'password';
+          el.textContent = isPwd ? '🙈 Ocultar' : '👁️ Ver';
+          inp.focus();
+        }
+        break;
+      }
       case 'toggle-show-pwd': ui.showPasswords = !ui.showPasswords; render(); break;
       case 'copiar-cred': {
         const txt = `AlfaTrack AlfaCredit S.A.\nNombre: ${el.dataset.nombre}\nUsuario: ${el.dataset.user}\nContraseña: ${el.dataset.pass}`;
@@ -1520,7 +1530,7 @@
   });
 
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-    navigator.serviceWorker.register('sw.js?v=5', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=6', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
   if (isDbManagerUrl() && ui.autenticado) fetchDbStats();
   render();
