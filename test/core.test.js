@@ -7,23 +7,33 @@ const U = (s, id) => s.usuarios.find((u) => u.id === id);
 const P = (s, nombre) => s.prospectos.find((p) => p.nombre === nombre);
 const datos = (o) => Object.assign({ nombre: 'Cliente Prueba', telefono: '8000-0001', direccion: 'X', negocio: 'Pulpería', monto: 1000 }, o);
 
-test('seed: >=8 prospects covering every state, all promotor branches present', () => {
+test('seed: exact 59 real collaborators, >=8 prospects covering every state, all operational branches covered', () => {
   const s = fresh();
+  assert.strictEqual(s.usuarios.length, 59);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'admin').length, 1);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'callcenter').length, 3);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'gerente').length, 8);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'promotor').length, 14);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'gestor').length, 33);
   assert.ok(s.prospectos.length >= 8);
   C.ESTADOS.forEach((e) => assert.ok(s.prospectos.some((p) => p.estado === e), e));
-  ['Estelí', 'Managua', 'Masaya', 'León', 'Juigalpa', 'Sébaco', 'Jinotepe', 'Rivas'].forEach((suc) =>
-    assert.ok(s.usuarios.some((u) => u.rol === 'promotor' && u.sucursal === suc), suc));
+  ['Estelí', 'Managua', 'Masaya', 'León', 'Juigalpa', 'Sébaco', 'Jinotepe', 'Rivas'].forEach((suc) => {
+    assert.ok(s.usuarios.some((u) => u.rol === 'gerente' && u.sucursal === suc), `gerente ${suc}`);
+    assert.ok(s.usuarios.some((u) => u.rol === 'gestor' && u.sucursal === suc), `gestor ${suc}`);
+  });
+  ['Managua', 'Masaya', 'León', 'Juigalpa', 'Sébaco', 'Jinotepe'].forEach((suc) =>
+    assert.ok(s.usuarios.some((u) => u.rol === 'promotor' && u.sucursal === suc), `promotor ${suc}`));
   assert.ok(s.notificaciones.some((n) => !n.leida), 'some unread notifications for the bell');
   assert.ok(JSON.parse(JSON.stringify(s)), 'serializable');
 });
 
 test('crearProspecto: origin comes from logged user, not form data', () => {
   const s = fresh();
-  const pro = U(s, 'u-pro-leon');
-  const r = C.crearProspecto(s, pro, datos({ promotor_origen_id: 'u-pro-esteli', promotor_nombre: 'Hacker', sucursal: 'Managua' }));
+  const pro = U(s, 'u-pro-leo-araceli');
+  const r = C.crearProspecto(s, pro, datos({ promotor_origen_id: 'u-pro-mga-lester', promotor_nombre: 'Hacker', sucursal: 'Managua' }));
   assert.ok(r.ok, r.error);
-  assert.strictEqual(r.prospecto.promotor_origen_id, 'u-pro-leon');
-  assert.strictEqual(r.prospecto.promotor_nombre, 'Fernanda Castillo');
+  assert.strictEqual(r.prospecto.promotor_origen_id, 'u-pro-leo-araceli');
+  assert.strictEqual(r.prospecto.promotor_nombre, 'Araceli De Jesús Juárez');
   assert.strictEqual(r.prospecto.sucursal, 'León');
   assert.strictEqual(r.prospecto.estado, 'nuevo');
   assert.strictEqual(r.prospecto.historial.length, 1);
@@ -36,16 +46,16 @@ test('phone validation: exactly 8 digits', () => {
   assert.ok(!C.validarTelefono('888812345'));
   assert.ok(!C.validarTelefono(''));
   const s = fresh();
-  assert.ok(!C.crearProspecto(s, U(s, 'u-pro-leon'), datos({ telefono: '123' })).ok);
+  assert.ok(!C.crearProspecto(s, U(s, 'u-pro-leo-araceli'), datos({ telefono: '123' })).ok);
 });
 
 test('duplicates by phone or cédula are blocked and name the original promotor', () => {
   const s = fresh();
-  const otro = U(s, 'u-pro-rivas');
-  let r = C.crearProspecto(s, otro, datos({ telefono: '88451122' })); // Juana, by Carlos Rivera
+  const otro = U(s, 'u-pro-mas-fanny');
+  let r = C.crearProspecto(s, otro, datos({ telefono: '88451122' })); // Juana, by Lester Antonio De La Rocha Rivera
   assert.ok(!r.ok);
-  assert.match(r.error, /Carlos Rivera/);
-  r = C.crearProspecto(s, otro, datos({ cedula: '161 150385 0002k' }));
+  assert.match(r.error, /Lester Antonio De La Rocha Rivera/);
+  r = C.crearProspecto(s, otro, datos({ cedula: '001 150385 0002k' }));
   assert.ok(!r.ok);
   assert.match(r.error, /cédula/);
   // optional cédula empty must not match other empty cédulas
@@ -55,26 +65,26 @@ test('duplicates by phone or cédula are blocked and name the original promotor'
 
 test('only promotores can create; inactive promotor cannot', () => {
   const s = fresh();
-  assert.ok(!C.crearProspecto(s, U(s, 'u-cc1'), datos()).ok);
-  const pro = U(s, 'u-pro-leon');
+  assert.ok(!C.crearProspecto(s, U(s, 'u-cc-betsy'), datos()).ok);
+  const pro = U(s, 'u-pro-leo-araceli');
   C.toggleUsuario(s, U(s, 'u-admin'), pro.id);
   assert.ok(!C.crearProspecto(s, pro, datos()).ok);
 });
 
 test('pescado requires confirmation fields and notifies gerente of branch + promotor', () => {
   const s = fresh();
-  const cc = U(s, 'u-cc1');
+  const cc = U(s, 'u-cc-betsy');
   const p = P(s, 'Juana María Rodríguez');
   assert.ok(!C.cambiarEstado(s, cc, p.id, 'pescado', { monto: 0 }).ok);
   assert.ok(!C.cambiarEstado(s, cc, p.id, 'pescado', { monto: 100, rubro: 'x', direccionVisita: 'y' }).ok, 'comments required');
   const r = C.cambiarEstado(s, cc, p.id, 'pescado', { monto: 100, rubro: 'Pulpería', direccionVisita: 'Casa', comentarios: 'OK' });
   assert.ok(r.ok, r.error);
   const dest = r.notificaciones.map((n) => n.userId).sort();
-  const gerEsteli = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Estelí').id;
-  assert.deepStrictEqual(dest, [gerEsteli, 'u-pro-esteli'].sort());
-  const msg = r.notificaciones.find((n) => n.userId === 'u-pro-esteli').texto;
+  const gerManagua = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Managua').id;
+  assert.deepStrictEqual(dest, [gerManagua, 'u-pro-mga-lester'].sort());
+  const msg = r.notificaciones.find((n) => n.userId === 'u-pro-mga-lester').texto;
   assert.strictEqual(msg, '¡Atención! Call Center ya calificó a tu cliente Juana María Rodríguez y fue enviado a tu Gerente de Sucursal.');
-  assert.strictEqual(p.promotor_origen_id, 'u-pro-esteli');
+  assert.strictEqual(p.promotor_origen_id, 'u-pro-mga-lester');
 });
 
 test('gerente assigns gestor without replacing origin; other branch gerente denied', () => {
@@ -84,25 +94,25 @@ test('gerente assigns gestor without replacing origin; other branch gerente deni
   const gerLeon = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'León');
   assert.ok(!C.cambiarEstado(s, gerLeon, p.id, 'seguimiento', { instrucciones: 'x' }).ok);
   assert.ok(!C.cambiarEstado(s, gerMasaya, p.id, 'seguimiento', {}).ok, 'instructions required');
-  const r = C.cambiarEstado(s, gerMasaya, p.id, 'seguimiento', { gestorId: 'u-ges-masaya', instrucciones: 'Visitar lunes' });
+  const r = C.cambiarEstado(s, gerMasaya, p.id, 'seguimiento', { gestorId: 'u-ges-mas-diego', instrucciones: 'Visitar lunes' });
   assert.ok(r.ok, r.error);
-  assert.strictEqual(p.promotor_origen_id, 'u-pro-masaya');
-  assert.strictEqual(p.gestorId, 'u-ges-masaya');
-  assert.deepStrictEqual(r.notificaciones.map((n) => n.userId).sort(), ['u-ges-masaya', 'u-pro-masaya']);
-  assert.match(r.notificaciones.find((n) => n.userId === 'u-pro-masaya').texto, /Visitar lunes/);
+  assert.strictEqual(p.promotor_origen_id, 'u-pro-mas-fanny');
+  assert.strictEqual(p.gestorId, 'u-ges-mas-diego');
+  assert.deepStrictEqual(r.notificaciones.map((n) => n.userId).sort(), ['u-ges-mas-diego', 'u-pro-mas-fanny']);
+  assert.match(r.notificaciones.find((n) => n.userId === 'u-pro-mas-fanny').texto, /Visitar lunes/);
   // promoter of another branch can't see it, gestor can
-  assert.ok(!C.puedeVer(U(s, 'u-pro-leon'), p));
-  assert.ok(C.puedeVer(U(s, 'u-ges-masaya'), p));
-  assert.ok(C.cambiarEstado(s, U(s, 'u-ges-masaya'), p.id, 'desembolsado', {}).ok);
+  assert.ok(!C.puedeVer(U(s, 'u-pro-leo-araceli'), p));
+  assert.ok(C.puedeVer(U(s, 'u-ges-mas-diego'), p));
+  assert.ok(C.cambiarEstado(s, U(s, 'u-ges-mas-diego'), p.id, 'desembolsado', {}).ok);
 });
 
 test('descartado requires motivo; invalid transitions rejected', () => {
   const s = fresh();
-  const cc = U(s, 'u-cc1');
+  const cc = U(s, 'u-cc-betsy');
   const p = P(s, 'Rosa Elena Calero');
   assert.ok(!C.cambiarEstado(s, cc, p.id, 'descartado', {}).ok);
   assert.ok(!C.cambiarEstado(s, cc, p.id, 'desembolsado', {}).ok, 'call center cannot disburse');
-  assert.ok(!C.cambiarEstado(s, U(s, 'u-pro-jinotepe'), p.id, 'pescado', {}).ok, 'promotor cannot move states');
+  assert.ok(!C.cambiarEstado(s, U(s, 'u-pro-jin-nydia'), p.id, 'pescado', {}).ok, 'promotor cannot move states');
   assert.ok(C.cambiarEstado(s, cc, p.id, 'descartado', { motivo: 'Fuera de zona' }).ok);
   assert.ok(!C.cambiarEstado(s, cc, p.id, 'gestion', {}).ok, 'closed for call center');
 });
@@ -114,7 +124,7 @@ test('history is append-only and records every change with user', () => {
   assert.deepStrictEqual(roles, ['promotor', 'callcenter', 'gerente', 'gerente']);
   p.historial.forEach((h) => assert.ok(h.ts && h.usuario && h.accion));
   const n = p.historial.length;
-  C.agregarNota(s, U(s, 'u-pro-esteli'), p.id, 'Cliente satisfecho');
+  C.agregarNota(s, U(s, 'u-pro-mga-lester'), p.id, 'Cliente satisfecho');
   assert.strictEqual(p.historial.length, n + 1);
 });
 
@@ -122,18 +132,18 @@ test('admin edits everything except the origin lock', () => {
   const s = fresh();
   const admin = U(s, 'u-admin');
   const p = P(s, 'Rosa Elena Calero');
-  assert.ok(!C.adminEditarProspecto(s, U(s, 'u-ger-0'), p.id, { nombre: 'X' }).ok);
-  let r = C.adminEditarProspecto(s, admin, p.id, { promotor_origen_id: 'u-pro-leon' });
+  assert.ok(!C.adminEditarProspecto(s, U(s, 'u-ger-esteli'), p.id, { nombre: 'X' }).ok);
+  let r = C.adminEditarProspecto(s, admin, p.id, { promotor_origen_id: 'u-pro-leo-araceli' });
   assert.ok(!r.ok);
   assert.match(r.error, /CANDADO/);
   r = C.adminEditarProspecto(s, admin, p.id, { telefono: '88451122' });
   assert.ok(!r.ok, 'duplicate on edit');
-  r = C.adminEditarProspecto(s, admin, p.id, { nombre: 'Rosa E. Calero', monto: 9000, gestorId: 'u-ges-leon' });
+  r = C.adminEditarProspecto(s, admin, p.id, { nombre: 'Rosa E. Calero', monto: 9000, gestorId: 'u-ges-leo-laleska' });
   assert.ok(r.ok, r.error);
   assert.strictEqual(p.nombre, 'Rosa E. Calero');
-  assert.strictEqual(p.promotor_origen_id, 'u-pro-jinotepe');
+  assert.strictEqual(p.promotor_origen_id, 'u-pro-jin-nydia');
   assert.match(p.historial.at(-1).detalle, /monto/);
-  assert.strictEqual(r.notificaciones[0].userId, 'u-ges-leon');
+  assert.strictEqual(r.notificaciones[0].userId, 'u-ges-leo-laleska');
   // admin can force any state
   assert.ok(C.cambiarEstado(s, admin, p.id, 'desembolsado', { monto: 9000 }).ok);
 });
@@ -144,7 +154,7 @@ test('admin users and config management', () => {
   let r = C.guardarUsuario(s, admin, { nombre: 'Nuevo Promotor', rol: 'promotor', sucursal: 'Rivas' });
   assert.ok(r.ok);
   assert.ok(!C.guardarUsuario(s, admin, { nombre: 'X Y Z', rol: 'hacker', sucursal: 'Rivas' }).ok);
-  assert.ok(!C.guardarUsuario(s, U(s, 'u-cc1'), { nombre: 'Abc', rol: 'admin', sucursal: 'Rivas' }).ok);
+  assert.ok(!C.guardarUsuario(s, U(s, 'u-cc-betsy'), { nombre: 'Abc', rol: 'admin', sucursal: 'Rivas' }).ok);
   assert.ok(!C.toggleUsuario(s, admin, admin.id).ok, 'cannot deactivate self');
   assert.ok(!C.guardarUsuario(s, admin, { id: admin.id, nombre: admin.nombre, rol: 'promotor', sucursal: 'Rivas' }).ok);
   const cfg = JSON.parse(JSON.stringify(s.config));
@@ -152,8 +162,8 @@ test('admin users and config management', () => {
   cfg.plantillas.notif_pescado_promotor = 'Calificado: {cliente}';
   assert.ok(C.guardarConfig(s, admin, cfg).ok);
   const p = P(s, 'Rosa Elena Calero');
-  r = C.cambiarEstado(s, U(s, 'u-cc1'), p.id, 'pescado', { monto: 1, rubro: 'a', direccionVisita: 'b', comentarios: 'c' });
-  assert.strictEqual(r.notificaciones.find((n) => n.userId === 'u-pro-jinotepe').texto, 'Calificado: Rosa Elena Calero');
+  r = C.cambiarEstado(s, U(s, 'u-cc-betsy'), p.id, 'pescado', { monto: 1, rubro: 'a', direccionVisita: 'b', comentarios: 'c' });
+  assert.strictEqual(r.notificaciones.find((n) => n.userId === 'u-pro-jin-nydia').texto, 'Calificado: Rosa Elena Calero');
   assert.match(p.historial.at(-1).accion, /Recién llegado/);
   const bad = JSON.parse(JSON.stringify(s.config));
   bad.sucursales = bad.sucursales.filter((x) => x !== 'León');
@@ -166,13 +176,13 @@ test('metricas', () => {
   const m = C.metricas(s);
   assert.strictEqual(m.total, s.prospectos.length);
   assert.strictEqual(m.porEstado.desembolsado, 2);
-  assert.strictEqual(m.porPromotor['u-pro-esteli'].monto, 25000);
+  assert.strictEqual(m.porPromotor['u-pro-mga-lester'].monto, 25000);
 });
 
 test('adversarial edge cases: cédula length, disbursement amount, inactive gestor, user rename & config guardrails', () => {
   const s = fresh();
   const admin = U(s, 'u-admin');
-  const pro = U(s, 'u-pro-esteli');
+  const pro = U(s, 'u-pro-mga-lester');
 
   // 1. Cédula must be exactly 14 normalized chars (rejects >14 as well as <14)
   assert.ok(!C.crearProspecto(s, pro, datos({ telefono: '80001111', cedula: '001-010190-0001A-EXTRA' })).ok);
@@ -185,7 +195,7 @@ test('adversarial edge cases: cédula length, disbursement amount, inactive gest
   assert.ok(!C.cambiarEstado(s, gerJui, pSeg.id, 'desembolsado', { monto: 0 }).ok);
 
   // 3. Admin cannot assign an inactive gestor to a prospect
-  const ges = U(s, 'u-ges-leon');
+  const ges = U(s, 'u-ges-leo-laleska');
   C.toggleUsuario(s, admin, ges.id);
   const pRosa = P(s, 'Rosa Elena Calero');
   assert.ok(!C.adminEditarProspecto(s, admin, pRosa.id, { gestorId: ges.id }).ok);
@@ -196,12 +206,12 @@ test('adversarial edge cases: cédula length, disbursement amount, inactive gest
   assert.ok(rEdit.ok, rEdit.error);
   const gerLeon = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'León');
   assert.ok(rEdit.notificaciones.some((n) => n.userId === gerLeon.id));
-  assert.strictEqual(C.metricas(s).porPromotor['u-pro-masaya'].sucursal, 'Masaya');
+  assert.strictEqual(C.metricas(s).porPromotor['u-pro-mas-fanny'].sucursal, 'Masaya');
 
   // 5. Admin renaming a promoter updates promotor_nombre on their prospects while keeping promotor_origen_id locked
-  C.guardarUsuario(s, admin, { id: 'u-pro-esteli', nombre: 'Carlos A. Rivera', rol: 'promotor', sucursal: 'Estelí' });
-  assert.strictEqual(P(s, 'Juana María Rodríguez').promotor_nombre, 'Carlos A. Rivera');
-  assert.strictEqual(P(s, 'Juana María Rodríguez').promotor_origen_id, 'u-pro-esteli');
+  C.guardarUsuario(s, admin, { id: 'u-pro-mga-lester', nombre: 'Lester A. De La Rocha', rol: 'promotor', sucursal: 'Managua' });
+  assert.strictEqual(P(s, 'Juana María Rodríguez').promotor_nombre, 'Lester A. De La Rocha');
+  assert.strictEqual(P(s, 'Juana María Rodríguez').promotor_origen_id, 'u-pro-mga-lester');
 
   // 6. Admin config rejects empty negocios or empty notification templates
   const badNeg = JSON.parse(JSON.stringify(s.config));
@@ -212,7 +222,7 @@ test('adversarial edge cases: cédula length, disbursement amount, inactive gest
   assert.ok(!C.guardarConfig(s, admin, badTpl).ok);
 });
 
-test('authentication & credentials: admin/admin123 + all real promoters and agents have unique username & password', () => {
+test('authentication & credentials: admin/admin123 + all 59 real staff authenticate and old demo accounts are removed', () => {
   const s = fresh();
   const usernames = new Set();
   for (const u of s.usuarios) {
@@ -226,33 +236,38 @@ test('authentication & credentials: admin/admin123 + all real promoters and agen
   assert.ok(rAdmin.ok, rAdmin.error);
   assert.strictEqual(rAdmin.usuario.rol, 'admin');
 
-  // Wrong password rejected
+  // Wrong password & removed demo accounts rejected
   assert.ok(!C.autenticar(s, 'admin', 'wrongpass').ok);
-  assert.ok(!C.autenticar(s, 'nonexistent', 'admin123').ok);
+  assert.ok(!C.autenticar(s, 'karla.mendoza', 'karla123').ok);
+  assert.ok(!C.autenticar(s, 'laura.varela', 'laura123').ok);
+  assert.ok(!C.autenticar(s, 'ernesto.vilchez', 'ernesto123').ok);
   assert.ok(!C.autenticar(s, '', '').ok);
 
-  // Real agents and official promoters from user table authenticate properly
+  // Real agents, managers, promoters, and credit officers authenticate properly
   for (const [u, p, rol, suc] of [
     ['betsy.ruiz', 'betsy123', 'callcenter', 'Casa Matriz'],
-    ['xochilt', 'xochilt123', 'callcenter', 'Casa Matriz'],
-    ['eva', 'eva123', 'callcenter', 'Casa Matriz'],
+    ['xochil.torrez', 'xochil123', 'callcenter', 'Casa Matriz'],
+    ['eva.sevilla', 'eva123', 'callcenter', 'Casa Matriz'],
+    ['gerente.managua', 'managua123', 'gerente', 'Managua'],
+    ['gerente.sebaco', 'sebaco123', 'gerente', 'Sébaco'],
+    ['gerente.esteli', 'esteli123', 'gerente', 'Estelí'],
     ['fanny.ramirez', 'fanny123', 'promotor', 'Masaya'],
     ['noelia.namendi', 'noelia123', 'promotor', 'Masaya'],
-    ['yeiling.munoz', 'yeiling123', 'promotor', 'Masaya'],
+    ['yeiling.perez', 'yeiling123', 'promotor', 'Masaya'],
     ['lester.rocha', 'lester123', 'promotor', 'Managua'],
     ['claudia.suazo', 'claudia123', 'promotor', 'Managua'],
-    ['maria.lopez', 'maria123', 'promotor', 'Managua'],
+    ['wendy.perez', 'wendy123', 'promotor', 'Managua'],
     ['marjorie.diaz', 'marjorie123', 'promotor', 'Managua'],
     ['nydia.sanchez', 'nydia123', 'promotor', 'Jinotepe'],
     ['martha.centeno', 'martha123', 'promotor', 'Juigalpa'],
-    ['aracely.juarez', 'aracely123', 'promotor', 'León'],
+    ['araceli.juarez', 'araceli123', 'promotor', 'León'],
+    ['juan.salinas', 'juan123', 'promotor', 'León'],
     ['lorena.castillo', 'lorena123', 'promotor', 'León'],
     ['evelia.diaz', 'evelia123', 'promotor', 'Sébaco'],
     ['jiurem.luna', 'jiurem123', 'promotor', 'Sébaco'],
-    ['laura.varela', 'laura123', 'promotor', 'Managua'],
-    ['cristell.calderon', 'cristell123', 'promotor', 'Estelí'],
-    ['massiel.morales', 'massiel123', 'promotor', 'Jinotepe'],
-    ['keyner.fajardo', 'keyner123', 'promotor', 'Rivas'],
+    ['carlos.rivera', 'carlos123', 'gestor', 'Estelí'],
+    ['diego.mendoza', 'diego123', 'gestor', 'Masaya'],
+    ['wendy.lopez', 'wendy123', 'gestor', 'Rivas'],
   ]) {
     const res = C.autenticar(s, u, p);
     assert.ok(res.ok, `failed login for ${u}: ${res.error}`);
@@ -261,47 +276,47 @@ test('authentication & credentials: admin/admin123 + all real promoters and agen
   }
 
   // Deactivated user cannot log in
-  const laura = s.usuarios.find((x) => x.username === 'laura.varela');
-  C.toggleUsuario(s, rAdmin.usuario, laura.id);
-  assert.ok(!C.autenticar(s, 'laura.varela', 'laura123').ok);
+  const claudia = s.usuarios.find((x) => x.username === 'claudia.suazo');
+  C.toggleUsuario(s, rAdmin.usuario, claudia.id);
+  assert.ok(!C.autenticar(s, 'claudia.suazo', 'claudia123').ok);
 });
 
 test('password management & duplicate username protection', () => {
   const s = fresh();
   const admin = U(s, 'u-admin');
-  const pro = s.usuarios.find((x) => x.username === 'carlos.rivera');
+  const pro = s.usuarios.find((x) => x.username === 'lester.rocha');
 
   // User changes own password with valid current password
   assert.ok(!C.cambiarPassword(s, pro, pro.id, 'wrong', 'nueva1234').ok);
-  assert.ok(!C.cambiarPassword(s, pro, pro.id, 'carlos123', '123').ok, 'too short');
-  assert.ok(C.cambiarPassword(s, pro, pro.id, 'carlos123', 'carlos2026').ok);
-  assert.ok(C.autenticar(s, 'carlos.rivera', 'carlos2026').ok);
+  assert.ok(!C.cambiarPassword(s, pro, pro.id, 'lester123', '123').ok, 'too short');
+  assert.ok(C.cambiarPassword(s, pro, pro.id, 'lester123', 'lester2026').ok);
+  assert.ok(C.autenticar(s, 'lester.rocha', 'lester2026').ok);
 
   // User cannot change another user's password; admin can reset without old password
   assert.ok(!C.cambiarPassword(s, pro, admin.id, 'admin123', 'hacked123').ok);
   assert.ok(C.cambiarPassword(s, admin, pro.id, '', 'reset123').ok);
-  assert.ok(C.autenticar(s, 'carlos.rivera', 'reset123').ok);
+  assert.ok(C.autenticar(s, 'lester.rocha', 'reset123').ok);
 
   // Duplicate username blocked in guardarUsuario
   assert.ok(!C.guardarUsuario(s, admin, { nombre: 'Otro Admin', rol: 'promotor', sucursal: 'Estelí', username: 'admin', password: '1234' }).ok);
 });
 
-test('CSV Depurador & Bulk Promoter Form Importer: classifies phones, resolves promoters and locks origin', () => {
+test('CSV Depurador & Bulk Promoter Form Importer: classifies phones, resolves real promoters and locks origin', () => {
   const s = fresh();
   const cc = s.usuarios.find((x) => x.username === 'betsy.ruiz');
   const filas = [
-    { Cliente: 'Elizabeth Lopez', Telefono: '84943179', Promotor: 'Laura v', VALOR: '15000', Negocio: 'Pulpería' },
-    { Cliente: 'Juan Jose Torrez', Telefono: '8423266', Pomotor: 'Cristell Calderon', VALOR: '10000' }, // 7 digits -> longitud
-    { Cliente: 'Junieth Carballo', Telefono: '89624881/ 75016969', Pomotor: 'Massiel Morales', VALOR: '20000' }, // especiales (recoverable)
+    { Cliente: 'Elizabeth Lopez', Telefono: '84943179', Promotor: 'Claudia Suazo', VALOR: '15000', Negocio: 'Pulpería' },
+    { Cliente: 'Juan Jose Torrez', Telefono: '8423266', Pomotor: 'Araceli Juarez', VALOR: '10000' }, // 7 digits -> longitud
+    { Cliente: 'Junieth Carballo', Telefono: '89624881/ 75016969', Pomotor: 'Nydia Sanchez', VALOR: '20000' }, // especiales (recoverable)
     { Cliente: 'Sin Telefono', Telefono: 'nan', Pomotor: 'Evelia Díaz', VALOR: '5000' }, // vacios
     { Cliente: 'Con Texto', Telefono: 'NO TIENE', Pomotor: 'Evelia Díaz', VALOR: '5000' }, // texto
-    { Cliente: 'Duplicado Existente', Telefono: '88451122', Pomotor: 'Carlos Rivera', VALOR: '12000' }, // already in seed (Juana)
-    { Cliente: 'Elizabeth Lopez', Telefono: '84943179', Promotor: 'Laura Varela', VALOR: '15000' }, // repeated in same CSV
+    { Cliente: 'Duplicado Existente', Telefono: '88451122', Pomotor: 'Lester De La Rocha', VALOR: '12000' }, // already in seed (Juana)
+    { Cliente: 'Elizabeth Lopez', Telefono: '84943179', Promotor: 'Claudia Suazo', VALOR: '15000' }, // repeated in same CSV
   ];
 
   const clasif = C.clasificarFilasCSV(s, filas, { recuperarEspeciales: true });
   assert.strictEqual(clasif.validos.length, 2, 'Elizabeth + recovered Junieth');
-  assert.strictEqual(clasif.validos[0].promotorNombre, 'Laura Varela');
+  assert.strictEqual(clasif.validos[0].promotorNombre, 'Claudia Cecilia Suazo Muñoz');
   assert.strictEqual(clasif.validos[1].telefono, '89624881');
   assert.strictEqual(clasif.validos[1].telefonoSecundario, '75016969');
   assert.strictEqual(clasif.longitud.length, 1);
@@ -314,19 +329,17 @@ test('CSV Depurador & Bulk Promoter Form Importer: classifies phones, resolves p
   const imp = C.importarFilasCSV(s, cc, filas, { recuperarEspeciales: true });
   assert.ok(imp.ok);
   assert.strictEqual(imp.importados.length, 2);
-  assert.strictEqual(imp.importados[0].promotor_nombre, 'Laura Varela');
+  assert.strictEqual(imp.importados[0].promotor_nombre, 'Claudia Cecilia Suazo Muñoz');
   assert.strictEqual(imp.importados[0].sucursal, 'Managua');
-  assert.strictEqual(imp.importados[1].promotor_nombre, 'Massiel Morales');
+  assert.strictEqual(imp.importados[1].promotor_nombre, 'Nydia Yessenia Sánchez Pérez');
   assert.strictEqual(imp.importados[1].sucursal, 'Jinotepe');
 
   // Verify fuzzy promoter resolution for real CSV typos and Latin-1 variants
-  assert.strictEqual(C.resolverPromotorCSV(s, 'Noelia Ñamendi').nombre, 'NOELIA SYLVANA ÑAMENDI CONTRERAS');
-  assert.strictEqual(C.resolverPromotorCSV(s, 'Massiel Norales').nombre, 'Massiel Morales');
-  assert.strictEqual(C.resolverPromotorCSV(s, 'Tainana jarquin').nombre, 'Tatiana Jarquín');
-  assert.strictEqual(C.resolverPromotorCSV(s, 'Tania jarquin').nombre, 'Tatiana Jarquín');
-  assert.strictEqual(C.resolverPromotorCSV(s, 'Marha lenis centeno chavarria').nombre, 'MARTHA LENYS CENTENO CHAVARRÍA');
-  assert.strictEqual(C.resolverPromotorCSV(s, 'Nidia Sánchez sucursal').nombre, 'NYDIA YESSENIA SÁNCHEZ PÉREZ');
-  assert.strictEqual(C.resolverPromotorCSV(s, 'María José López Wilson').nombre, 'Maria Jose Lopez Wilson');
+  assert.strictEqual(C.resolverPromotorCSV(s, 'Noelia Ñamendi').nombre, 'Noelia Sylvana Ñamendi Contreras');
+  assert.strictEqual(C.resolverPromotorCSV(s, 'Marha lenis centeno chavarria').nombre, 'Martha Lenys Centeno Chavarría');
+  assert.strictEqual(C.resolverPromotorCSV(s, 'Nidia Sánchez sucursal').nombre, 'Nydia Yessenia Sánchez Pérez');
+  assert.strictEqual(C.resolverPromotorCSV(s, 'Yeiling Perez Munoz').nombre, 'Yeiling Patricia Pérez Muñoz');
+  assert.strictEqual(C.resolverPromotorCSV(s, 'Aracely Juarez').nombre, 'Araceli De Jesús Juárez');
 });
 
 test('scrypt password hashing: per-user random salt, timingSafeEqual verify, and seamless migration on login', () => {
@@ -353,7 +366,7 @@ test('Core.upgradeState preserves scoped mode without re-injecting secrets or hi
   const scoped = C.upgradeState({
     version: 1,
     _scoped: true,
-    usuarios: [{ id: 'u-pro-esteli', username: 'carlos.rivera', nombre: 'Carlos Rivera', rol: 'promotor', sucursal: 'Estelí', activo: true }],
+    usuarios: [{ id: 'u-pro-mga-lester', username: 'lester.rocha', nombre: 'Lester Antonio De La Rocha Rivera', rol: 'promotor', sucursal: 'Managua', activo: true }],
     prospectos: [],
     notificaciones: [],
     auditoria: [],
@@ -367,25 +380,25 @@ test('Core.upgradeState preserves scoped mode without re-injecting secrets or hi
 test('Call Center Directo: capture without promoter, branch/phone/monto normalization, idempotency & manager distribution', () => {
   const s = fresh();
   const betsy = s.usuarios.find((u) => u.username === 'betsy.ruiz');
-  const gerEsteli = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Estelí');
+  const gerManagua = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Managua');
   const gerLeon = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'León');
-  const proEsteli = s.usuarios.find((u) => u.rol === 'promotor' && u.sucursal === 'Estelí' && u.activo);
-  const gesEsteli = s.usuarios.find((u) => u.rol === 'gestor' && u.sucursal === 'Estelí' && u.activo);
+  const proManagua = s.usuarios.find((u) => u.rol === 'promotor' && u.sucursal === 'Managua' && u.activo);
+  const gesManagua = s.usuarios.find((u) => u.rol === 'gestor' && u.sucursal === 'Managua' && u.activo);
   const admin = U(s, 'u-admin');
 
-  // 1. Capture from Python app format ("Sucursal Esteli", "+505 8311-2233 / 7722-3344", "C$ 20,000")
+  // 1. Capture from Python app format ("Sucursal Managua", "+505 8311-2233 / 7722-3344", "C$ 20,000")
   const r1 = C.capturarCasoCallCenterDirecto(s, betsy, {
     externalId: 'cc-py-r150-abc',
     sheetRow: 150,
-    agenteNombre: 'Betsy Ruiz',
+    agenteNombre: 'Betsy Mabell Ruíz Herrera',
     nombre: 'María Elena Torres',
     tipoCredito: 'NV(NUEVO)',
     telefono: '+505 8311-2233 / 7722-3344',
-    sucursal: 'Sucursal Esteli',
-    emailGerente: 'gerenteesteli7@gmail.com',
+    sucursal: 'Sucursal Managua',
+    emailGerente: 'gerentemanaguabolonia@gmail.com',
     monto: 'C$ 20,000',
     negocio: 'Pulpería',
-    direccion: 'Barrio El Calvario 2c al sur',
+    direccion: 'Barrio Bolonia 2c al sur',
     plataforma: 'Facebook',
     campana: 'Campaña Noviembre',
     origenApp: 'python_callcenter',
@@ -394,7 +407,7 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
   assert.strictEqual(r1.deduplicated, false);
   const p = r1.prospecto;
   assert.strictEqual(C.esCallCenterDirecto(p), true);
-  assert.strictEqual(p.sucursal, 'Estelí');
+  assert.strictEqual(p.sucursal, 'Managua');
   assert.strictEqual(p.telefono, '83112233');
   assert.strictEqual(p.telefonoSecundario, '77223344');
   assert.strictEqual(p.monto, 20000);
@@ -402,13 +415,13 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
   assert.strictEqual(p.promotor_origen_id, C.ORIGEN_CC_ID);
   assert.strictEqual(p.sheetSync.status, 'synced');
   assert.strictEqual(p.sheetSync.sheetRow, 150);
-  assert.ok(r1.notificaciones.some((n) => n.userId === gerEsteli.id), 'notifies branch manager');
+  assert.ok(r1.notificaciones.some((n) => n.userId === gerManagua.id), 'notifies branch manager');
 
-  // 2. Visibility before distribution: Gerente Estelí & Call Center & Admin see it; Promoter & other branch manager do NOT
-  assert.ok(C.puedeVer(gerEsteli, p));
+  // 2. Visibility before distribution: Gerente Managua & Call Center & Admin see it; Promoter & other branch manager do NOT
+  assert.ok(C.puedeVer(gerManagua, p));
   assert.ok(C.puedeVer(betsy, p));
   assert.ok(C.puedeVer(admin, p));
-  assert.ok(!C.puedeVer(proEsteli, p));
+  assert.ok(!C.puedeVer(proManagua, p));
   assert.ok(!C.puedeVer(gerLeon, p));
 
   // 3. Idempotent retry by externalId or sheetRow does NOT duplicate
@@ -416,7 +429,7 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
     externalId: 'cc-py-r150-abc',
     nombre: 'María Elena Torres',
     telefono: '8311-2233',
-    sucursal: 'Sucursal Esteli',
+    sucursal: 'Sucursal Managua',
   });
   assert.ok(rDupExt.ok);
   assert.strictEqual(rDupExt.deduplicated, true);
@@ -426,7 +439,7 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
     sheetRow: 150,
     nombre: 'María Elena Torres',
     telefono: '8311-2233',
-    sucursal: 'Sucursal Esteli',
+    sucursal: 'Sucursal Managua',
   });
   assert.ok(rDupRow.ok && rDupRow.deduplicated === true);
 
@@ -436,7 +449,7 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
     sheetRow: 151,
     nombre: 'Otro Nombre',
     telefono: '83112233',
-    sucursal: 'Sucursal Managua',
+    sucursal: 'Sucursal Esteli',
   });
   assert.ok(!rDupPhone.ok);
   assert.strictEqual(rDupPhone.duplicate, true);
@@ -446,39 +459,39 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
   assert.ok(!C.cambiarEstado(s, gerLeon, p.id, 'seguimiento', { instrucciones: 'Intento externo' }).ok);
 
   // 6. Branch Manager distributes to Promotor + Gestor; both see it, promoter can add follow-up note, CC agent notified
-  const rDist = C.cambiarEstado(s, gerEsteli, p.id, 'seguimiento', {
-    asignadoPromotorId: proEsteli.id,
-    gestorId: gesEsteli.id,
+  const rDist = C.cambiarEstado(s, gerManagua, p.id, 'seguimiento', {
+    asignadoPromotorId: proManagua.id,
+    gestorId: gesManagua.id,
     instrucciones: 'Visitar hoy por la tarde y levantar expediente.',
   });
   assert.ok(rDist.ok, rDist.error);
-  assert.strictEqual(p.asignadoPromotorId, proEsteli.id);
-  assert.strictEqual(p.asignadoPromotorNombre, proEsteli.nombre);
-  assert.strictEqual(p.gestorId, gesEsteli.id);
+  assert.strictEqual(p.asignadoPromotorId, proManagua.id);
+  assert.strictEqual(p.asignadoPromotorNombre, proManagua.nombre);
+  assert.strictEqual(p.gestorId, gesManagua.id);
   assert.strictEqual(p.promotor_origen_id, C.ORIGEN_CC_ID, 'origin remains Call Center Directo');
-  assert.ok(C.puedeVer(proEsteli, p), 'assigned promoter now sees the case');
-  assert.ok(C.puedeVer(gesEsteli, p), 'assigned gestor now sees the case');
-  assert.ok(rDist.notificaciones.some((n) => n.userId === proEsteli.id));
-  assert.ok(rDist.notificaciones.some((n) => n.userId === gesEsteli.id));
+  assert.ok(C.puedeVer(proManagua, p), 'assigned promoter now sees the case');
+  assert.ok(C.puedeVer(gesManagua, p), 'assigned gestor now sees the case');
+  assert.ok(rDist.notificaciones.some((n) => n.userId === proManagua.id));
+  assert.ok(rDist.notificaciones.some((n) => n.userId === gesManagua.id));
   assert.ok(rDist.notificaciones.some((n) => n.userId === betsy.id));
 
   // Assigned promoter adds follow-up note; cannot force state transitions
-  assert.ok(C.agregarNota(s, proEsteli, p.id, 'Visitada en pulpería, entrega cédula mañana.').ok);
-  assert.ok(!C.cambiarEstado(s, proEsteli, p.id, 'desembolsado', { monto: 20000 }).ok);
+  assert.ok(C.agregarNota(s, proManagua, p.id, 'Visitada en pulpería, entrega cédula mañana.').ok);
+  assert.ok(!C.cambiarEstado(s, proManagua, p.id, 'desembolsado', { monto: 20000 }).ok);
 
   // Admin cannot override Call Center origin lock either
-  assert.ok(!C.adminEditarProspecto(s, admin, p.id, { promotor_origen_id: proEsteli.id }).ok);
+  assert.ok(!C.adminEditarProspecto(s, admin, p.id, { promotor_origen_id: proManagua.id }).ok);
 
   // 7. Gestor closes as desembolsado; metrics track Call Center Directo separately from street promoter commissions
-  const rClose = C.cambiarEstado(s, gesEsteli, p.id, 'desembolsado', { monto: 20000 });
+  const rClose = C.cambiarEstado(s, gesManagua, p.id, 'desembolsado', { monto: 20000 });
   assert.ok(rClose.ok, rClose.error);
   const m = C.metricas(s);
   assert.strictEqual(m.porPromotor[C.ORIGEN_CC_ID], undefined, 'CC Directo must not pollute street promoter commission table');
   assert.strictEqual(m.callCenterDirecto.total, 1);
   assert.strictEqual(m.callCenterDirecto.desembolsados, 1);
   assert.strictEqual(m.callCenterDirecto.montoDesembolsado, 20000);
-  assert.strictEqual(m.callCenterDirecto.porSucursal['Estelí'].desembolsado, 1);
-  assert.strictEqual(m.callCenterDirecto.porAgente['Betsy Ruiz'].desembolsado, 1);
+  assert.strictEqual(m.callCenterDirecto.porSucursal['Managua'].desembolsado, 1);
+  assert.strictEqual(m.callCenterDirecto.porAgente['Betsy Mabell Ruíz Herrera'].desembolsado, 1);
 
   // 8. Direct manager handling (no promoter, no gestor) & dash monto ("-") works cleanly
   const r2 = C.capturarCasoCallCenterDirecto(s, betsy, {
@@ -502,9 +515,9 @@ test('Call Center Directo: capture without promoter, branch/phone/monto normaliz
 test('Call Center Directo adversarial edge cases: real dual phones, negative/dot montos, branch matching, atomic validation & admin sync', () => {
   const s = fresh();
   const betsy = s.usuarios.find((u) => u.username === 'betsy.ruiz');
-  const gerEsteli = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Estelí');
-  const proEsteli = s.usuarios.find((u) => u.rol === 'promotor' && u.sucursal === 'Estelí' && u.activo);
-  const gesEsteli = s.usuarios.find((u) => u.rol === 'gestor' && u.sucursal === 'Estelí' && u.activo);
+  const gerManagua = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Managua');
+  const proManagua = s.usuarios.find((u) => u.rol === 'promotor' && u.sucursal === 'Managua' && u.activo);
+  const gesManagua = s.usuarios.find((u) => u.rol === 'gestor' && u.sucursal === 'Managua' && u.activo);
   const admin = U(s, 'u-admin');
 
   // 1. Real production phone strings from Call Center clientes_cache.json
@@ -530,7 +543,7 @@ test('Call Center Directo adversarial edge cases: real dual phones, negative/dot
   const cap = C.capturarCasoCallCenterDirecto(s, betsy, {
     nombre: 'Cliente Atomicidad CC',
     telefono: '86962464 - 57962751',
-    sucursal: 'Sucursal Esteli',
+    sucursal: 'Sucursal Managua',
     monto: 'C$ 15.000',
   });
   assert.ok(cap.ok, cap.error);
@@ -539,8 +552,8 @@ test('Call Center Directo adversarial edge cases: real dual phones, negative/dot
   assert.strictEqual(p.telefonoSecundario, '57962751');
   assert.strictEqual(p.monto, 15000);
 
-  const failDist = C.cambiarEstado(s, gerEsteli, p.id, 'seguimiento', {
-    gestorId: gesEsteli.id,
+  const failDist = C.cambiarEstado(s, gerManagua, p.id, 'seguimiento', {
+    gestorId: gesManagua.id,
     asignadoPromotorId: 'u-inexistente',
     instrucciones: 'Debe fallar sin mutar gestorId',
   });
@@ -548,11 +561,11 @@ test('Call Center Directo adversarial edge cases: real dual phones, negative/dot
   assert.strictEqual(p.gestorId, null, 'gestorId must remain null when asignadoPromotorId validation fails');
 
   // 5. Distribute cleanly, then Admin clears asignadoPromotorId & changes sucursal -> gerencia.asignadoA & notifications stay consistent
-  assert.ok(C.cambiarEstado(s, gerEsteli, p.id, 'seguimiento', {
-    asignadoPromotorId: proEsteli.id,
+  assert.ok(C.cambiarEstado(s, gerManagua, p.id, 'seguimiento', {
+    asignadoPromotorId: proManagua.id,
     instrucciones: 'Evaluar negocio',
   }).ok);
-  assert.match(p.gerencia.asignadoA, /Carlos Rivera/);
+  assert.match(p.gerencia.asignadoA, /Lester Antonio De La Rocha Rivera/);
 
   const ed = C.adminEditarProspecto(s, admin, p.id, { asignadoPromotorId: '', sucursal: 'León' });
   assert.ok(ed.ok, ed.error);

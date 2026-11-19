@@ -93,12 +93,12 @@ test('POST /api/auth/login signs HMAC-SHA256 tokens and scopes state strictly by
   assert.ok(okAdmin.data.token.startsWith('at_tok_'));
   assert.ok(okAdmin.data.token.includes('.'), 'token must carry HMAC signature segment');
   assert.strictEqual(okAdmin.data.usuario.rol, 'admin');
-  assert.ok(okAdmin.data.state.usuarios.length >= 60);
+  assert.strictEqual(okAdmin.data.state.usuarios.length, 59);
 
   // Non-admin promoter receives role-scoped state: NO passwords, NO other promoters' prospects, NO audit log
-  const okPro = await api('/api/auth/login', { body: { username: 'laura.varela', password: 'laura123' } });
+  const okPro = await api('/api/auth/login', { body: { username: 'claudia.suazo', password: 'claudia123' } });
   assert.strictEqual(okPro.status, 200);
-  assert.strictEqual(okPro.data.usuario.nombre, 'Laura Varela');
+  assert.strictEqual(okPro.data.usuario.nombre, 'Claudia Cecilia Suazo Muñoz');
   assert.strictEqual(okPro.data.usuario.password, undefined, 'must not expose password to non-admin');
   assert.strictEqual(okPro.data.usuario.passwordHash, undefined, 'must not expose passwordHash to non-admin');
   assert.ok(okPro.data.state.usuarios.every((u) => u.password === undefined && u.passwordHash === undefined), 'no user passwords leaked to promoter');
@@ -110,10 +110,10 @@ test('POST /api/auth/login signs HMAC-SHA256 tokens and scopes state strictly by
   assert.strictEqual(stPro.status, 200);
   assert.ok(stPro.data.state.usuarios.every((u) => u.password === undefined));
 
-  // Authenticated /api/check-dup detects duplicate from another branch without exposing their prospect list
+  // Authenticated /api/check-dup detects duplicate from another promoter without exposing their prospect list
   const dupRes = await api('/api/check-dup?telefono=88451122', { token: okPro.data.token });
   assert.strictEqual(dupRes.status, 200);
-  assert.ok(dupRes.data.duplicate && /Carlos Rivera/.test(dupRes.data.duplicate.mensaje));
+  assert.ok(dupRes.data.duplicate && /Lester Antonio De La Rocha Rivera/.test(dupRes.data.duplicate.mensaje));
   const noDup = await api('/api/check-dup?telefono=89990000', { token: okPro.data.token });
   assert.strictEqual(noDup.status, 200);
   assert.strictEqual(noDup.data.duplicate, null);
@@ -159,19 +159,19 @@ test('POST /api/auth/password requires signed token, ignores spoofed actorId, an
 });
 
 test('POST /api/mutate creates prospects with token identity, imports CSVs, and restricts /api/sync to admin', async () => {
-  const laura = await login('laura.varela', 'laura123');
+  const claudia = await login('claudia.suazo', 'claudia123');
   const betsy = await login('betsy.ruiz', 'betsy123');
 
   // Non-admin blocked from /api/sync
-  const syncDenied = await api('/api/sync', { token: laura.token, body: { state: { usuarios: [] } } });
+  const syncDenied = await api('/api/sync', { token: claudia.token, body: { state: { usuarios: [] } } });
   assert.strictEqual(syncDenied.status, 403);
 
-  // Even if spoofed actorId is passed, server locks origin to authenticated token (Laura Varela)
+  // Even if spoofed actorId is passed, server locks origin to authenticated token (Claudia Cecilia Suazo Muñoz)
   const m1 = await api('/api/mutate', {
-    token: laura.token,
+    token: claudia.token,
     body: {
       action: 'crearProspecto',
-      actorId: 'u-pro-esteli',
+      actorId: 'u-pro-mas-fanny',
       payload: {
         nombre: 'Cliente API Managua',
         telefono: '8555-4433',
@@ -184,8 +184,8 @@ test('POST /api/mutate creates prospects with token identity, imports CSVs, and 
     },
   });
   assert.strictEqual(m1.status, 200);
-  assert.strictEqual(m1.data.result.prospecto.promotor_nombre, 'Laura Varela');
-  assert.strictEqual(m1.data.result.prospecto.promotor_origen_id, laura.usuario.id);
+  assert.strictEqual(m1.data.result.prospecto.promotor_nombre, 'Claudia Cecilia Suazo Muñoz');
+  assert.strictEqual(m1.data.result.prospecto.promotor_origen_id, claudia.usuario.id);
 
   const csvImp = await api('/api/mutate', {
     token: betsy.token,
@@ -193,29 +193,29 @@ test('POST /api/mutate creates prospects with token identity, imports CSVs, and 
       action: 'importarFilasCSV',
       payload: {
         filas: [
-          { Cliente: 'Cliente CSV Esteli', Telefono: '86667788', Promotor: 'Cristell Calderon', VALOR: '25000', Negocio: 'Taller' },
+          { Cliente: 'Cliente CSV Leon', Telefono: '86667788', Promotor: 'Araceli Juarez', VALOR: '25000', Negocio: 'Taller' },
         ],
       },
     },
   });
   assert.strictEqual(csvImp.status, 200);
   assert.strictEqual(csvImp.data.result.importados.length, 1);
-  assert.strictEqual(csvImp.data.result.importados[0].promotor_nombre, 'Cristell Massiel Calderón Osorio');
+  assert.strictEqual(csvImp.data.result.importados[0].promotor_nombre, 'Araceli De Jesús Juárez');
 });
 
 test('Database manager API: strict auth + admin-only enforcement, real SQL errors, and backup create/restore', async () => {
   const admin = await login('admin', 'admin123');
-  const carlos = await login('carlos.rivera', 'carlos123');
+  const lester = await login('lester.rocha', 'lester123');
 
   // Unauthenticated -> 401; non-admin -> 403
   assert.strictEqual((await api('/api/db/stats')).status, 401);
-  assert.strictEqual((await api('/api/db/stats', { token: carlos.token })).status, 403);
+  assert.strictEqual((await api('/api/db/stats', { token: lester.token })).status, 403);
   assert.strictEqual((await api('/api/db/table?name=alfatrack_usuarios&limit=10')).status, 401);
-  assert.strictEqual((await api('/api/db/table?name=alfatrack_usuarios&limit=10', { token: carlos.token })).status, 403);
+  assert.strictEqual((await api('/api/db/table?name=alfatrack_usuarios&limit=10', { token: lester.token })).status, 403);
 
   const stats = await api('/api/db/stats', { token: admin.token });
   assert.strictEqual(stats.status, 200);
-  assert.ok(stats.data.tables.some((t) => t.name === 'alfatrack_usuarios' && t.rows >= 60));
+  assert.ok(stats.data.tables.some((t) => t.name === 'alfatrack_usuarios' && t.rows === 59));
 
   const tbl = await api('/api/db/table?name=alfatrack_usuarios&limit=10', { token: admin.token });
   assert.strictEqual(tbl.status, 200);
@@ -224,7 +224,7 @@ test('Database manager API: strict auth + admin-only enforcement, real SQL error
 
   // Non-admin rejected from SQL console
   const unauthSql = await api('/api/db/query', {
-    token: carlos.token,
+    token: lester.token,
     body: { sql: 'SELECT * FROM alfatrack_usuarios' },
   });
   assert.strictEqual(unauthSql.status, 403);
@@ -268,26 +268,28 @@ test('Database manager API: strict auth + admin-only enforcement, real SQL error
   assert.ok(rst.data.ok);
 });
 
-test('upgradeState migrates legacy pre-v2 official promoters once and preserves subsequent admin edits', async () => {
+test('upgradeState migrates legacy roster to realRosterV3 once and preserves subsequent admin edits', async () => {
   const admin = await login('admin', 'admin123');
   const legacy = DB.upgradeState({
     version: 1,
     usuarios: [
-      { id: 'u-pro-managua', nombre: 'María José López', rol: 'promotor', sucursal: 'Managua', username: 'maria.lopez', password: 'customPassword123' },
-      { id: 'u-pro-leo-araceli', nombre: 'Araceli Juárez', rol: 'promotor', sucursal: 'León', username: 'araceli.juarez', password: 'araceli123' },
+      { id: 'u-admin', nombre: 'Admin Viejo', rol: 'admin', sucursal: 'Casa Matriz', username: 'admin', password: 'customAdminPassword123' },
+      { id: 'u-cc1', nombre: 'Karla Mendoza', rol: 'callcenter', sucursal: 'Casa Matriz', username: 'karla.mendoza', password: 'karla123' },
+      { id: 'u-pro-leo-araceli', nombre: 'ARACELY JUÁREZ', rol: 'promotor', sucursal: 'León', username: 'aracely.juarez', password: 'araceli123' },
     ],
     prospectos: [
-      { id: 'p-1', nombre: 'Cliente 1', telefono: '88881111', promotor_origen_id: 'u-pro-managua', promotor_nombre: 'María José López', sucursal: 'Managua', estado: 'nuevo', creado: new Date().toISOString(), actualizado: new Date().toISOString(), historial: [] },
+      { id: 'p-1', nombre: 'Cliente 1', telefono: '88881111', promotor_origen_id: 'u-pro-leo-araceli', promotor_nombre: 'ARACELY JUÁREZ', sucursal: 'León', estado: 'nuevo', creado: new Date().toISOString(), actualizado: new Date().toISOString(), historial: [] },
     ],
   });
-  assert.strictEqual(legacy.officialPromotersV2, true);
-  const maria = legacy.usuarios.find((u) => u.id === 'u-pro-managua');
-  assert.strictEqual(maria.nombre, 'Maria Jose Lopez Wilson');
-  assert.strictEqual(maria.password, 'customPassword123', 'preserves custom password during migration');
-  const aracely = legacy.usuarios.find((u) => u.id === 'u-pro-leo-araceli');
-  assert.strictEqual(aracely.nombre, 'ARACELY JUÁREZ');
-  assert.strictEqual(aracely.username, 'aracely.juarez');
-  assert.strictEqual(legacy.prospectos[0].promotor_nombre, 'Maria Jose Lopez Wilson');
+  assert.strictEqual(legacy.realRosterV3, true);
+  assert.strictEqual(legacy.usuarios.length, 59);
+  assert.strictEqual(legacy.usuarios.find((u) => u.username === 'karla.mendoza'), undefined, 'old demo user removed');
+  const adm = legacy.usuarios.find((u) => u.id === 'u-admin');
+  assert.strictEqual(adm.password, 'customAdminPassword123', 'preserves custom password during migration');
+  const araceli = legacy.usuarios.find((u) => u.id === 'u-pro-leo-araceli');
+  assert.strictEqual(araceli.nombre, 'Araceli De Jesús Juárez');
+  assert.strictEqual(araceli.username, 'araceli.juarez');
+  assert.strictEqual(legacy.prospectos[0].promotor_nombre, 'Araceli De Jesús Juárez');
 
   const editRes = await api('/api/mutate', {
     token: admin.token,
@@ -295,7 +297,7 @@ test('upgradeState migrates legacy pre-v2 official promoters once and preserves 
       action: 'guardarUsuario',
       payload: {
         id: 'u-pro-mas-fanny',
-        nombre: 'FANNY DEL CARMEN RAMÍREZ LÓPEZ',
+        nombre: 'Fanny Del Carmen Ramírez López',
         rol: 'promotor',
         sucursal: 'Managua',
         username: 'fanny.ramirez',
@@ -315,7 +317,7 @@ test('upgradeState migrates legacy pre-v2 official promoters once and preserves 
       action: 'guardarUsuario',
       payload: {
         id: 'u-pro-mas-fanny',
-        nombre: 'FANNY DEL CARMEN RAMÍREZ LÓPEZ',
+        nombre: 'Fanny Del Carmen Ramírez López',
         rol: 'promotor',
         sucursal: 'Masaya',
         username: 'fanny.ramirez',
@@ -326,20 +328,20 @@ test('upgradeState migrates legacy pre-v2 official promoters once and preserves 
 });
 
 test('POST /api/mutate handles concurrent requests from two promoters without lost updates', async () => {
-  const carlos = await login('carlos.rivera', 'carlos123');
-  const maria = await login('maria.lopez', 'maria123');
+  const lester = await login('lester.rocha', 'lester123');
+  const fanny = await login('fanny.ramirez', 'fanny123');
   const admin = await login('admin', 'admin123');
 
   const [r1, r2] = await Promise.all([
     api('/api/mutate', {
-      token: carlos.token,
+      token: lester.token,
       body: {
         action: 'crearProspecto',
         payload: { nombre: 'Concurrente Uno', telefono: '8111-0001', negocio: 'Pulpería', monto: 10000 },
       },
     }),
     api('/api/mutate', {
-      token: maria.token,
+      token: fanny.token,
       body: {
         action: 'crearProspecto',
         payload: { nombre: 'Concurrente Dos', telefono: '8111-0002', negocio: 'Taller', monto: 12000 },
@@ -377,16 +379,16 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
 
   try {
     const betsy = await login('betsy.ruiz', 'betsy123');
-    const gerEsteli = await login('gerente.esteli', 'esteli123');
-    const proEsteli = await login('carlos.rivera', 'carlos123');
+    const gerManagua = await login('gerente.managua', 'managua123');
+    const proManagua = await login('lester.rocha', 'lester123');
     const admin = await login('admin', 'admin123');
 
     // 1. Auth enforcement on /api/integrations/callcenter/ingest and /status
-    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { body: { nombre: 'Sin Auth', telefono: '81119999', sucursal: 'Estelí' } })).status, 401);
-    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { headers: { 'X-AlfaTrack-Key': 'wrong-key' }, body: { nombre: 'Bad Key', telefono: '81119999', sucursal: 'Estelí' } })).status, 401);
-    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { token: proEsteli.token, body: { nombre: 'Promotor No', telefono: '81119999', sucursal: 'Estelí' } })).status, 403);
+    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { body: { nombre: 'Sin Auth', telefono: '81119999', sucursal: 'Managua' } })).status, 401);
+    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { headers: { 'X-AlfaTrack-Key': 'wrong-key' }, body: { nombre: 'Bad Key', telefono: '81119999', sucursal: 'Managua' } })).status, 401);
+    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { token: proManagua.token, body: { nombre: 'Promotor No', telefono: '81119999', sucursal: 'Managua' } })).status, 403);
     assert.strictEqual((await api('/api/integrations/callcenter/status')).status, 401);
-    assert.strictEqual((await api('/api/integrations/callcenter/status', { token: proEsteli.token })).status, 403);
+    assert.strictEqual((await api('/api/integrations/callcenter/status', { token: proManagua.token })).status, 403);
 
     // 2. Python app pushes a new Call Center case via X-AlfaTrack-Key (must NOT echo back to Google Sheets!)
     const ing1 = await api('/api/integrations/callcenter/ingest', {
@@ -394,14 +396,14 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
       body: {
         externalId: 'cc-py-r180-test',
         sheetRow: 180,
-        agente: 'Xochilt',
+        agente: 'Xochil María Torrez Silva',
         nombre: 'Sofía Martínez Python',
         tipoCredito: 'NV(NUEVO)',
         telefono: '8444-5566',
-        direccion: 'Estelí, Barrio Central',
+        direccion: 'Managua, Barrio Bolonia',
         negocio: 'Comedor / Fritanga',
-        emailGerente: 'gerenteesteli7@gmail.com',
-        sucursal: 'Sucursal Esteli',
+        emailGerente: 'gerentemanaguabolonia@gmail.com',
+        sucursal: 'Sucursal Managua',
         monto: 'C$ 18,000',
         plataforma: 'Facebook',
         detalle: 'Campaña Crédito Rápido',
@@ -410,7 +412,7 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
     assert.strictEqual(ing1.status, 201, JSON.stringify(ing1.data));
     assert.strictEqual(ing1.data.ok, true);
     assert.strictEqual(ing1.data.deduplicated, false);
-    assert.strictEqual(ing1.data.prospecto.sucursal, 'Estelí');
+    assert.strictEqual(ing1.data.prospecto.sucursal, 'Managua');
     assert.strictEqual(ing1.data.prospecto.estado, 'pescado');
     assert.strictEqual(ing1.data.prospecto.sheetSync.sheetRow, 180);
     assert.strictEqual(sheetsCalls.length, 0, 'ingest from Python must NOT write duplicate row back to Google Sheets');
@@ -421,10 +423,10 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
       body: {
         externalId: 'cc-py-r180-test',
         sheetRow: 180,
-        agente: 'Xochilt',
+        agente: 'Xochil María Torrez Silva',
         nombre: 'Sofía Martínez Python',
         telefono: '8444-5566',
-        sucursal: 'Sucursal Esteli',
+        sucursal: 'Sucursal Managua',
       },
     });
     assert.strictEqual(ingReplay.status, 200);
@@ -437,19 +439,19 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
       body: {
         externalId: 'cc-py-r181-dup',
         sheetRow: 181,
-        agente: 'Eva',
+        agente: 'Eva Nerys Sevilla Rivera',
         nombre: 'Otra Persona',
         telefono: '84445566',
-        sucursal: 'Sucursal Managua',
+        sucursal: 'Sucursal Esteli',
       },
     });
     assert.strictEqual(ingDupPhone.status, 409);
     assert.strictEqual(ingDupPhone.data.duplicate, true);
 
     // Branch Manager sees Python lead immediately; promoter does NOT until distributed
-    const gerState = await api('/api/state', { token: gerEsteli.token });
+    const gerState = await api('/api/state', { token: gerManagua.token });
     assert.ok(gerState.data.state.prospectos.some((p) => p.id === ing1.data.prospecto.id));
-    const proStateBefore = await api('/api/state', { token: proEsteli.token });
+    const proStateBefore = await api('/api/state', { token: proManagua.token });
     assert.ok(!proStateBefore.data.state.prospectos.some((p) => p.id === ing1.data.prospecto.id));
 
     // 3. Dual entry: Call Center creates Directo lead INSIDE AlfaTrack Web -> appends to Google Sheets (triggering manager email!)
@@ -460,11 +462,11 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
         payload: {
           nombre: 'Roberto Sánchez Web',
           telefono: '8444-7788',
-          sucursal: 'Estelí',
+          sucursal: 'Managua',
           tipoCredito: 'RP(REPRESTAMO)',
           monto: 25000,
           negocio: 'Taller',
-          direccion: 'Estelí, salida norte',
+          direccion: 'Managua, salida norte',
           plataforma: 'Whatsapp',
           campana: 'WhatsApp Directo',
           notas: 'Solicita visita mañana',
@@ -478,23 +480,23 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
     assert.strictEqual(pWeb.sheetSync.sheetRow, 205);
     assert.strictEqual(sheetsCalls.length, 1);
     assert.strictEqual(sheetsCalls[0].op, 'append');
-    assert.strictEqual(sheetsCalls[0].values[0], 'Betsy Ruiz');
+    assert.strictEqual(sheetsCalls[0].values[0], 'Betsy Mabell Ruíz Herrera');
     assert.strictEqual(sheetsCalls[0].values[2], 'Roberto Sánchez Web');
-    assert.strictEqual(sheetsCalls[0].values[7], 'gerenteesteli7@gmail.com');
-    assert.strictEqual(sheetsCalls[0].values[8], 'Sucursal Esteli');
+    assert.strictEqual(sheetsCalls[0].values[7], 'gerentemanaguabolonia@gmail.com');
+    assert.strictEqual(sheetsCalls[0].values[8], 'Sucursal Managua');
     assert.strictEqual(sheetsCalls[0].values[9], 'C$ 25,000');
 
-    // 4. Branch Manager distributes the Web Call Center lead to Carlos Rivera -> updates AlfaTrack AND syncs K:O in Google Sheets!
+    // 4. Branch Manager distributes the Web Call Center lead to Lester -> updates AlfaTrack AND syncs K:O in Google Sheets!
     const dist = await api('/api/mutate', {
-      token: gerEsteli.token,
+      token: gerManagua.token,
       body: {
         action: 'cambiarEstado',
         payload: {
           id: pWeb.id,
           estado: 'seguimiento',
           datos: {
-            asignadoPromotorId: proEsteli.usuario.id,
-            instrucciones: 'Carlos, contactar hoy y evaluar taller.',
+            asignadoPromotorId: proManagua.usuario.id,
+            instrucciones: 'Lester, contactar hoy y evaluar taller.',
           },
         },
       },
@@ -504,14 +506,14 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
     assert.strictEqual(sheetsCalls[1].op, 'update_followup');
     assert.strictEqual(sheetsCalls[1].row, 205);
     assert.strictEqual(sheetsCalls[1].values[0], 'Proceso');
-    assert.match(sheetsCalls[1].values[1], /Carlos, contactar hoy/);
-    assert.strictEqual(sheetsCalls[1].values[2], 'Carlos Rivera');
+    assert.match(sheetsCalls[1].values[1], /Lester, contactar hoy/);
+    assert.strictEqual(sheetsCalls[1].values[2], 'Lester Antonio De La Rocha Rivera');
 
     // Promoter now sees distributed lead and can add follow-up note (which also syncs K:O!)
-    const proStateAfter = await api('/api/state', { token: proEsteli.token });
+    const proStateAfter = await api('/api/state', { token: proManagua.token });
     assert.ok(proStateAfter.data.state.prospectos.some((p) => p.id === pWeb.id));
     const noteRes = await api('/api/mutate', {
-      token: proEsteli.token,
+      token: proManagua.token,
       body: { action: 'agregarNota', payload: { id: pWeb.id, texto: 'Visitado, documentación completa.' } },
     });
     assert.strictEqual(noteRes.status, 200);
@@ -520,7 +522,7 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
 
     // Manager closes as desembolsado -> syncs Desembolsado + monto to Google Sheets!
     const closeRes = await api('/api/mutate', {
-      token: gerEsteli.token,
+      token: gerManagua.token,
       body: { action: 'cambiarEstado', payload: { id: pWeb.id, estado: 'desembolsado', datos: { monto: 25000 } } },
     });
     assert.strictEqual(closeRes.status, 200);
@@ -535,7 +537,7 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
       token: betsy.token,
       body: {
         action: 'capturarCasoCallCenterDirecto',
-        payload: { nombre: 'Cliente Reintento Sheet', telefono: '8444-9900', sucursal: 'Estelí', monto: 12000 },
+        payload: { nombre: 'Cliente Reintento Sheet', telefono: '8444-9900', sucursal: 'Managua', monto: 12000 },
       },
     });
     assert.strictEqual(webFail.status, 200);
@@ -544,10 +546,10 @@ test('Call Center unification API: Python ingest (idempotent, auth, branch routi
 
     // Manager distributes BEFORE Sheets append recovers
     const distBeforeRetry = await api('/api/mutate', {
-      token: gerEsteli.token,
+      token: gerManagua.token,
       body: {
         action: 'cambiarEstado',
-        payload: { id: pRetryId, estado: 'seguimiento', datos: { asignadoPromotorId: proEsteli.usuario.id, instrucciones: 'Llamar en cuanto vuelva Sheets' } },
+        payload: { id: pRetryId, estado: 'seguimiento', datos: { asignadoPromotorId: proManagua.usuario.id, instrucciones: 'Llamar en cuanto vuelva Sheets' } },
       },
     });
     assert.strictEqual(distBeforeRetry.status, 200);

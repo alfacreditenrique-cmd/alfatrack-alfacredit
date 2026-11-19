@@ -877,7 +877,7 @@
           <small>Soporta UTF-8 y Windows-1252 (Excel)</small>
         </label>
         <label class="csv-textarea-wrap">O pega aquí las filas CSV de tus formularios:
-          <textarea class="csv-textarea" rows="5" data-input="csv-text" placeholder="Cliente,Telefono,Promotor,VALOR&#10;Elizabeth Lopez,84943179,Laura Varela,15000&#10;Bismarck José López,57591567,Yeiling Muñoz,20000">${h(ui.csv.rawText)}</textarea>
+          <textarea class="csv-textarea" rows="5" data-input="csv-text" placeholder="Cliente,Telefono,Promotor,VALOR&#10;Elizabeth Lopez,84943179,Claudia Suazo,15000&#10;Bismarck José López,57591567,Yeiling Pérez,20000">${h(ui.csv.rawText)}</textarea>
         </label>
       </div>
       <div class="row" style="margin-bottom:12px">
@@ -2000,12 +2000,12 @@
       case 'csv-ejemplo': {
         ui.csv.rawText = [
           'Cliente,Telefono,Promotor,VALOR,Negocio,Direccion',
-          'Elizabeth Lopez,84943179,Laura Varela,15000,Pulpería,Barrio Bolonia Managua',
-          'Bismarck José López,57591567,Yeiling Muñoz,20000,Taller,Monimbó Masaya',
-          'María Lopez,85273671,Darling Elieth Galeano,18000,Comedor / Fritanga,Barrio El Calvario Estelí',
-          'Junieth Carballo,89624881/ 75016969,Massiel Morales,25000,Venta de ropa,Jinotepe Mercado',
-          'Juan Jose Torrez,8423266,Cristell Calderon,10000,Agricultura,Estelí (7 dígitos - inválido)',
-          'Juana María Rodríguez,88451122,Carlos Rivera,15000,Pulpería,Estelí (Ya existe en BD)',
+          'Elizabeth Lopez,84943179,Claudia Suazo,15000,Pulpería,Barrio Bolonia Managua',
+          'Bismarck José López,57591567,Yeiling Pérez Muñoz,20000,Taller,Monimbó Masaya',
+          'María Lopez,85273671,Araceli Juárez,18000,Comedor / Fritanga,Barrio Sutiava León',
+          'Junieth Carballo,89624881/ 75016969,Nydia Sánchez,25000,Venta de ropa,Jinotepe Mercado',
+          'Juan Jose Torrez,8423266,Martha Centeno,10000,Agricultura,Juigalpa (7 dígitos - inválido)',
+          'Juana María Rodríguez,88451122,Lester De La Rocha,15000,Pulpería,Managua (Ya existe en BD)',
         ].join('\n');
         ui.csv.filas = parseCSVText(ui.csv.rawText);
         ui.csv.clasif = C.clasificarFilasCSV(S, ui.csv.filas, { promotorDefault: u.rol === 'promotor' ? u : null, sucursal: u.rol === 'promotor' ? u.sucursal : '', recuperarEspeciales: true });
@@ -2558,7 +2558,7 @@
   });
 
   if ('serviceWorker' in navigator && isHttp()) {
-    navigator.serviceWorker.register('sw.js?v=8', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=9', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
 
   render();

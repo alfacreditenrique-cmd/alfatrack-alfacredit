@@ -126,7 +126,7 @@ try {
     set(f.telefono,'88451122');
     const formattedTel = f.telefono.value;
     const telStatus = $('#tel-status')?.textContent;
-    await waitFor(() => !$('#dup-alert').hidden && $('#dup-alert').textContent.includes('Carlos Rivera'));
+    await waitFor(() => !$('#dup-alert').hidden && $('#dup-alert').textContent.includes('Lester Antonio De La Rocha Rivera'));
     const dupShown = $('#dup-alert').textContent;
     const submitDisabledOnDup = f.querySelector('button[type=submit]').disabled;
     set(f.telefono,'82223333');
@@ -149,14 +149,14 @@ try {
   assert.ok(r.signedTok && r.hasMobileNav && r.hasFab, JSON.stringify(r));
   assert.strictEqual(r.formattedTel, '8845-1122');
   assert.match(r.telStatus, /8 dígitos/);
-  assert.match(r.dupShown, /Carlos Rivera/);
+  assert.match(r.dupShown, /Lester Antonio De La Rocha Rivera/);
   assert.ok(r.submitDisabledOnDup && r.dupCleared && r.focusKept && r.foundBySearch && r.card, JSON.stringify(r));
   await shot('01-promotor-mobile', 390, 844, true);
 
-  // 2. Call Center (karla.mendoza): View Switcher (Tabla / Kanban with C$ totals & SLA badges) + qualify to pescado
+  // 2. Call Center (betsy.ruiz): View Switcher (Tabla / Kanban with C$ totals & SLA badges) + qualify to pescado
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   r = await ev(H + `
-    await loginAs('karla.mendoza', 'karla123');
+    await loginAs('betsy.ruiz', 'betsy123');
     // Switch to Kanban board and verify pipeline columns + totals + SLA badges
     click('[data-action=view-mode]', 'Kanban');
     const kanbanCols = $$('.kanban-col').length;
@@ -173,7 +173,7 @@ try {
     return { kanbanCols, kanbanHasTotals, hasSlaBadge, visible, badge: cardOf('Prueba E2E Cliente').textContent, t: toasts() };`);
   assert.ok(r.kanbanCols === 6 && r.kanbanHasTotals && r.hasSlaBadge && r.visible, JSON.stringify(r));
   assert.match(r.badge, /Pescado/);
-  assert.ok(r.t.some((x) => /Se notificó a: .*FANNY DEL CARMEN RAMÍREZ LÓPEZ/.test(x) && /Patricia Aguirre/.test(x)), JSON.stringify(r.t));
+  assert.ok(r.t.some((x) => /Se notificó a: .*Fanny Del Carmen Ramírez López/.test(x) && /Mary Cruz Cruz Matute/.test(x)), JSON.stringify(r.t));
   await shot('03-cc-desktop', 1280, 900, false);
 
   // 3. Promotor (fanny.ramirez) logs in and sees bell + notification toast
@@ -184,22 +184,22 @@ try {
   assert.ok(r.t.some((x) => x.includes('¡Atención! Call Center ya calificó a tu cliente Prueba E2E Cliente y fue enviado a tu Gerente de Sucursal')), JSON.stringify(r.t));
   await shot('04-promotor-toast', 390, 844, true);
 
-  // 4. Gerente Masaya assigns follow-up with Gestor
+  // 4. Gerente Masaya (Mary Cruz Cruz Matute) assigns follow-up with Oficial/Gestor (Diego Armando Mendoza Ugarte)
   r = await ev(H + `
     await loginAs('gerente.masaya', 'masaya123');
-    const c=cardOf('Prueba E2E Cliente'); const seal=c.textContent.includes('PROPIEDAD DE PROMOTOR: FANNY DEL CARMEN RAMÍREZ LÓPEZ');
+    const c=cardOf('Prueba E2E Cliente'); const seal=c.textContent.includes('PROPIEDAD DE PROMOTOR: Fanny Del Carmen Ramírez López');
     c.querySelector('[data-pre=seguimiento]').click();
-    const f=$('form[data-form=estado]'); set(f.gestorId,'u-ges-masaya'); set(f.instrucciones,'Visitar el lunes'); f.requestSubmit();
+    const f=$('form[data-form=estado]'); set(f.gestorId,'u-ges-mas-diego'); set(f.instrucciones,'Visitar el lunes'); f.requestSubmit();
     await waitFor(() => !$('.modal'));
     click('.tabs button','En seguimiento');
     await waitFor(() => !!cardOf('Prueba E2E Cliente'));
     return { seal, ok: !!cardOf('Prueba E2E Cliente'), txt: cardOf('Prueba E2E Cliente')?.textContent };`);
-  assert.ok(r.seal && r.ok && /Ernesto Vílchez/.test(r.txt) && /Visitar el lunes/.test(r.txt), JSON.stringify(r));
+  assert.ok(r.seal && r.ok && /Diego Armando Mendoza Ugarte/.test(r.txt) && /Visitar el lunes/.test(r.txt), JSON.stringify(r));
   await shot('05-gerente', 390, 844, true);
 
-  // 5. Gestor closes case -> Slide-Over Detail Drawer shows 4 timeline steps
+  // 5. Oficial/Gestor (diego.mendoza) closes case -> Slide-Over Detail Drawer shows 4 timeline steps
   r = await ev(H + `
-    await loginAs('ernesto.vilchez', 'ernesto123');
+    await loginAs('diego.mendoza', 'diego123');
     cardOf('Prueba E2E Cliente').querySelector('[data-pre=desembolsado]').click();
     $('form[data-form=estado]').requestSubmit();
     await waitFor(() => !$('.modal'));
@@ -279,18 +279,18 @@ try {
   assert.ok(r.hasTable && /lectura/i.test(r.realSqlError) && r.hasSqlRes && r.hasStyledCsvTa && r.beforeCount >= 2, JSON.stringify(r));
   await shot('08-admin-db-manager', 1280, 900, false);
 
-  // 8. Official promoters (Yeiling Muñoz, Maria Jose Lopez Wilson, Laura Varela) see their imported prospects
+  // 8. Official real promoters (Yeiling Pérez, Araceli Juárez, Claudia Suazo) see their imported prospects
   r = await ev(H + `
-    await loginAs('yeiling.munoz', 'yeiling123');
+    await loginAs('yeiling.perez', 'yeiling123');
     const seesBismarck = !!cardOf('Bismarck José López');
     const whoYeiling = $('.who')?.textContent;
-    await loginAs('maria.lopez', 'maria123');
-    const whoMaria = $('.who')?.textContent;
-    await loginAs('laura.varela', 'laura123');
+    await loginAs('araceli.juarez', 'araceli123');
+    const whoAraceli = $('.who')?.textContent;
+    await loginAs('claudia.suazo', 'claudia123');
     const seesImported = !!cardOf('Elizabeth Lopez');
-    return { seesBismarck, whoYeiling, whoMaria, seesImported, who: $('.who')?.textContent };`);
-  assert.ok(r.seesBismarck && /YEILING PATRICIA PÉREZ MUÑOZ/.test(r.whoYeiling) && /Maria Jose Lopez Wilson/.test(r.whoMaria) && r.seesImported && /Laura Varela/.test(r.who), JSON.stringify(r));
-  await shot('09-promotora-laura', 390, 844, true);
+    return { seesBismarck, whoYeiling, whoAraceli, seesImported, who: $('.who')?.textContent };`);
+  assert.ok(r.seesBismarck && /Yeiling Patricia Pérez Muñoz/.test(r.whoYeiling) && /Araceli De Jesús Juárez/.test(r.whoAraceli) && r.seesImported && /Claudia Cecilia Suazo Muñoz/.test(r.who), JSON.stringify(r));
+  await shot('09-promotora-claudia', 390, 844, true);
 
   // 9. Direct /turso route opens DB Manager for Admin
   const tursoUrl = targetUrl.replace(/\/index\.html$/, '').replace(/\/+$/, '') + '/turso';
@@ -312,33 +312,33 @@ try {
     click('.tabs button', 'Captura Call Center');
     const fc = $('form[data-form=captura-cc-directo]');
     if (!fc) throw new Error('Directo form not shown by default');
-    set(fc.sucursal, 'Estelí');
+    set(fc.sucursal, 'Managua');
     const autoEmail = fc.emailGerente.value;
     set(fc.nombre, 'Cliente Directo CC E2E');
     set(fc.telefono, '83334455');
     set(fc.monto, '22000');
     set(fc.negocio, 'Pulpería');
-    set(fc.direccion, 'Estelí, barrio central');
+    set(fc.direccion, 'Managua, barrio Bolonia');
     set(fc.notas, 'Interesada vía Facebook');
     fc.requestSubmit();
     await waitFor(() => !!cardOf('Cliente Directo CC E2E'));
 
-    // 10b. Gerente Estelí sees the Directo case, filters by Directo Call Center, distributes to Carlos Rivera + Danilo Herrera
-    await loginAs('gerente.esteli', 'esteli123');
+    // 10b. Gerente Managua (Claudia Lorena Cano García) sees Directo case, filters by Directo Call Center, distributes to Lester + Jamilton
+    await loginAs('gerente.managua', 'managua123');
     click('[data-action=ger-origen][data-val=callcenter_directo]');
     const gc = cardOf('Cliente Directo CC E2E');
-    if (!gc) throw new Error('Gerente Estelí did not see Directo CC case');
+    if (!gc) throw new Error('Gerente Managua did not see Directo CC case');
     const hasCCSeal = gc.textContent.includes('CASO DIRECTO CALL CENTER');
     gc.querySelector('[data-pre=seguimiento]').click();
     const fe = $('form[data-form=estado]');
-    set(fe.asignadoPromotorId, 'u-pro-esteli');
-    set(fe.gestorId, 'u-ges-esteli');
-    set(fe.instrucciones, 'Carlos y Danilo coordinar visita hoy.');
+    set(fe.asignadoPromotorId, 'u-pro-mga-lester');
+    set(fe.gestorId, 'u-ges-mga-jamilton');
+    set(fe.instrucciones, 'Lester y Jamilton coordinar visita hoy.');
     fe.requestSubmit();
     await waitFor(() => !$('.modal'));
 
-    // 10c. Assigned promoter (carlos.rivera) sees distributed CC Directo case and adds follow-up note
-    await loginAs('carlos.rivera', 'carlos123');
+    // 10c. Assigned promoter (lester.rocha) sees distributed CC Directo case and adds follow-up note
+    await loginAs('lester.rocha', 'lester123');
     const pc = cardOf('Cliente Directo CC E2E');
     if (!pc) throw new Error('Assigned promoter did not see distributed CC Directo case');
     pc.querySelector('[data-action=ver]').click();
@@ -351,9 +351,9 @@ try {
     // 10d. Admin sees Call Center Directo traceability section in Métricas
     await loginAs('admin', 'admin123');
     click('.tabs button', 'Métricas');
-    const hasCCMetrics = $('#app').textContent.includes('Trazabilidad Call Center Directo') && $('#app').textContent.includes('Betsy Ruiz');
+    const hasCCMetrics = $('#app').textContent.includes('Trazabilidad Call Center Directo') && $('#app').textContent.includes('Betsy Mabell Ruíz Herrera');
     return { autoEmail, hasCCSeal, hasCCMetrics };`);
-  assert.strictEqual(r.autoEmail, 'gerenteesteli7@gmail.com');
+  assert.strictEqual(r.autoEmail, 'gerentemanaguabolonia@gmail.com');
   assert.ok(r.hasCCSeal && r.hasCCMetrics, JSON.stringify(r));
 
   assert.deepStrictEqual(errors, [], 'no console errors');
