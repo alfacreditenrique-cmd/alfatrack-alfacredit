@@ -1,6 +1,6 @@
 // App-shell cache so AlfaTrack opens offline once installed. Bump CACHE when shipping new files.
-const CACHE = 'alfatrack-v9';
-const SHELL = ['./', './index.html', './styles.css?v=9', './core.js?v=9', './sound.js?v=9', './app.js?v=9', './icon.svg', './manifest.webmanifest'];
+const CACHE = 'alfatrack-v10';
+const SHELL = ['./', './index.html', './styles.css?v=10', './core.js?v=10', './sound.js?v=10', './app.js?v=10', './icon.svg', './manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

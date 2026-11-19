@@ -2558,7 +2558,7 @@
   });
 
   if ('serviceWorker' in navigator && isHttp()) {
-    navigator.serviceWorker.register('sw.js?v=9', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=10', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
 
   render();

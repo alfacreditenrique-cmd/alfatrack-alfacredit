@@ -1313,7 +1313,7 @@
 
   // ---------- seed ----------
   function seed() {
-    const s = { version: 1, officialPromotersV2: true, realRosterV3: true, config: defaultConfig(), usuarios: [], prospectos: [], notificaciones: [], auditoria: [] };
+    const s = { version: 1, officialPromotersV2: true, realRosterV3: true, realRosterV4: true, config: defaultConfig(), usuarios: [], prospectos: [], notificaciones: [], auditoria: [] };
     const usados = new Set();
     const U = (id, nombre, rol, sucursal, username, password, email, cedula) => {
       const uname = username ? normUser(username) : genUsername(nombre, usados);
@@ -1339,12 +1339,12 @@
     // 1. ADMINISTRADOR GENERAL (1 — Casa Matriz)
     const admin = U('u-admin', 'Enrique José Castillo Sobalvarro', 'admin', 'Casa Matriz', 'admin', 'admin123', 'alfacreditenrique@gmail.com', '161-280698-1001F');
 
-    // 2. AGENTES DE CALL CENTER (3 — Casa Matriz · Lista Oficial 17/11/2026)
+    // 2. AGENTES DE CALL CENTER (3 — Casa Matriz · Cartilla Oficial RRHH)
     const cc1 = U('u-cc-betsy', 'Betsy Mabell Ruíz Herrera', 'callcenter', 'Casa Matriz', 'betsy.ruiz', 'betsy123', 'betsy.callcenter@alfacreditsa.com', '321-220493-1000N');
     const cc2 = U('u-cc-xochil', 'Xochil María Torrez Silva', 'callcenter', 'Casa Matriz', 'xochil.torrez', 'xochil123', 'xochil.callcenter@alfacreditsa.com', '441-050800-1005A');
     const cc3 = U('u-cc-eva', 'Eva Nerys Sevilla Rivera', 'callcenter', 'Casa Matriz', 'eva.sevilla', 'eva123', 'eva.callcenter@alfacreditsa.com', '241-040383-1000F');
 
-    // 3. GERENTES DE SUCURSAL (8 — 1 por sucursal operativa · Lista Oficial 17/11/2026)
+    // 3. GERENTES DE SUCURSAL (8 — 1 por sucursal operativa · Cartilla Oficial RRHH + Mildred en Sébaco)
     const ger = {};
     [
       ['u-ger-esteli', 'Estelí', 'Lester Antonio Blandón Herrera', 'gerente.esteli', 'esteli123', 'gerenteesteli7@gmail.com', '441-300881-0016P'],
@@ -1357,12 +1357,11 @@
       ['u-ger-sebaco', 'Sébaco', 'Mildred Castillo', 'gerente.sebaco', 'sebaco123', 'gerentesebaco@gmail.com', ''],
     ].forEach(([id, suc, n, u, p, em, ced]) => { ger[suc] = U(id, n, 'gerente', suc, u, p, em, ced); });
 
-    // 4. PROMOTORES DE CRÉDITO (14 — Lista Oficial 17/11/2026)
+    // 4. PROMOTORES DE CRÉDITO (13 — 12 Promotores + Araceli Juárez en León · Cartilla Oficial RRHH)
     const pro = {
       jinotepe: U('u-pro-jin-nydia', 'Nydia Yessenia Sánchez Pérez', 'promotor', 'Jinotepe', 'nydia.sanchez', 'nydia123', '', '401-200183-0007F'),
       juigalpa: U('u-pro-jui-martha', 'Martha Lenys Centeno Chavarría', 'promotor', 'Juigalpa', 'martha.centeno', 'martha123', '', '604-240686-0000D'),
       leon: U('u-pro-leo-araceli', 'Araceli De Jesús Juárez', 'promotor', 'León', 'araceli.juarez', 'araceli123', '', '084-251276-0000F'),
-      leonJuan: U('u-pro-leo-juan', 'Juan Fernando Salinas Baldizón', 'promotor', 'León', 'juan.salinas', 'juan123', '', '281-240676-0013E'),
       leonLorena: U('u-pro-leo-lorena', 'Lorena Mercedes Castillo Torres', 'promotor', 'León', 'lorena.castillo', 'lorena123', '', '281-020785-0005F'),
       managua: U('u-pro-mga-lester', 'Lester Antonio De La Rocha Rivera', 'promotor', 'Managua', 'lester.rocha', 'lester123', '', '001-241180-0017A'),
       managuaMarjorie: U('u-pro-mga-marjorie', 'Marjorie de los Angeles Díaz Reyes', 'promotor', 'Managua', 'marjorie.diaz', 'marjorie123', '', '561-021090-0001N'),
@@ -1375,50 +1374,71 @@
       sebacoJiurem: U('u-pro-seb-jiurem', 'Jiurem Taniuska Luna Torres', 'promotor', 'Sébaco', 'jiurem.luna', 'jiurem123', '', '449-190293-0001J'),
     };
 
-    // 5. OFICIALES / GESTORES DE CRÉDITO (33 — Lista Oficial 17/11/2026)
+    // 5. OFICIALES / GESTORES DE CRÉDITO (54 — 43 Oficiales de Crédito + 6 Supervisores + 5 Oficiales de Desembolso · Cartilla Oficial RRHH)
     const ges = {};
     [
-      // Estelí (7)
+      // Estelí (8: 7 Oficiales + 1 Supervisor)
       ['u-ges-est-ali', 'Alí René Castellón Romero', 'Estelí', 'ali.castellon', 'ali123', '161-010382-0010M'],
       ['u-ges-est-jonathan', 'Jonathan Andrés Castillo Rocha', 'Estelí', 'jonathan.castillo', 'jonathan123', '161-070598-1005H'],
       ['u-ges-est-monica', 'Mónica María Betanco Morales', 'Estelí', 'monica.betanco', 'monica123', '161-041295-0007D'],
       ['u-ges-est-jeyson', 'Jeyson Ernesto Talavera Galeano', 'Estelí', 'jeyson.talavera', 'jeyson123', '161-170997-1004K'],
       ['u-ges-est-luis', 'Luis Fernando Montenegro Talavera', 'Estelí', 'luis.montenegro', 'luis123', '161-190303-1003K'],
       ['u-ges-est-kairo', 'Kairo Josué Espinoza Acevedo', 'Estelí', 'kairo.espinoza', 'kairo123', '161-100603-1007P'],
-      ['u-ges-est-carlos', 'Carlos Ariel Rivera García', 'Estelí', 'carlos.rivera', 'carlos123', '247-120298-1000P'],
-      // Jinotepe (2)
+      ['u-ges-est-jaime', 'Jaime Enmanuel Vindel Pérez', 'Estelí', 'jaime.vindel', 'jaime123', '164-260998-1000W'],
+      ['u-ges-est-janhson', 'Janhson Ariel Picado Castillo', 'Estelí', 'janhson.picado', 'janhson123', '441-070303-1003D'],
+      // Jinotepe (5: 4 Oficiales + 1 Oficial de Desembolso)
       ['u-ges-jin-berman', 'Berman Leonel Baltodano Nicoya', 'Jinotepe', 'berman.baltodano', 'berman123', '042-110491-0000L'],
       ['u-ges-jin-jefferson', 'Jefferson Ariel Vivas Cortes', 'Jinotepe', 'jefferson.vivas', 'jefferson123', '202-170194-0001W'],
-      // Juigalpa (4)
+      ['u-ges-jin-mario', 'Mario José López Narváez', 'Jinotepe', 'mario.lopez', 'mario123', '041-070583-0001L'],
+      ['u-ges-jin-naun', 'Naun Oronte Toruño Calero', 'Jinotepe', 'naun.toruno', 'naun123', '409-141290-0000H'],
+      ['u-ges-jin-larry', 'Larry Alexander Bermúdez Jiménez', 'Jinotepe', 'larry.bermudez', 'larry123', '046-230394-0000J'],
+      // Juigalpa (6: 4 Oficiales + 1 Supervisor + 1 Oficial de Desembolso)
       ['u-ges-jui-oscar', 'Oscar Gabriel Silva Díaz', 'Juigalpa', 'oscar.silva', 'oscar123', '121-041293-0002N'],
       ['u-ges-jui-melvin', 'Melvin Yamil Andino Guevara', 'Juigalpa', 'melvin.andino', 'melvin123', '121-190504-1008C'],
       ['u-ges-jui-adonis', 'Adonis Antonio Requénez Gaitán', 'Juigalpa', 'adonis.requenez', 'adonis123', '121-140999-1005X'],
       ['u-ges-jui-loaring', 'Loaring Esnayder Urbina Sándigo', 'Juigalpa', 'loaring.urbina', 'loaring123', '121-091001-1004A'],
-      // León (2)
+      ['u-ges-jui-lesther', 'Lesther David Báez Martínez', 'Juigalpa', 'lesther.baez', 'lesther123', '121-281083-0012S'],
+      ['u-ges-jui-wilmer', 'Wilmer Antonio Soza Cruz', 'Juigalpa', 'wilmer.soza', 'wilmer123', '121-140991-0002B'],
+      // León (5: 4 Oficiales + 1 Supervisor)
       ['u-ges-leo-laleska', 'Laleska Fernanda Bucardo Morales', 'León', 'laleska.bucardo', 'laleska123', '281-260799-1005T'],
       ['u-ges-leo-leonidas', 'Leonidas José Urcuyo Quintero', 'León', 'leonidas.urcuyo', 'leonidas123', '281-300192-0015A'],
-      // Managua (5)
+      ['u-ges-leo-juan', 'Juan Fernando Salinas Baldizón', 'León', 'juan.salinas', 'juan123', '281-240676-0013E'],
+      ['u-ges-leo-jaqueline', 'Jaqueline del Carmen Soza Acosta', 'León', 'jaqueline.soza', 'jaqueline123', '281-041185-0014V'],
+      ['u-ges-leo-darvis', 'Darvis Ivanis Pérez Armas', 'León', 'darvis.perez', 'darvis123', '281-240979-0013H'],
+      // Managua (11: 9 Oficiales + 1 Supervisor + 1 Oficial de Desembolso)
       ['u-ges-mga-justin', 'Justin Azael Calderón Peña', 'Managua', 'justin.calderon', 'justin123', '001-250707-1051W'],
       ['u-ges-mga-jamilton', 'Jamilton Rodolfo Montenegro Moraga', 'Managua', 'jamilton.montenegro', 'jamilton123', '001-191187-0000H'],
       ['u-ges-mga-douglas', 'Douglas Tomás Rivas Miranda', 'Managua', 'douglas.rivas', 'douglas123', '001-100192-0019R'],
       ['u-ges-mga-carlos', 'Carlos Daniel Salinas Rayo', 'Managua', 'carlos.salinas', 'carlos123', '241-220102-1005C'],
-      ['u-ges-mga-luis', 'Luis Antonio Méndez Solano', 'Managua', 'luis.mendez', 'luis123', '001-231200-1055S'],
-      // Masaya (5)
+      ['u-ges-mga-luis', 'Luis Antonio Méndez Solano', 'Managua', 'luis.mendez', 'luis123', '001-231200-1055G'],
+      ['u-ges-mga-oscar', 'Oscar Danilo Aguilar Sánchez', 'Managua', 'oscar.aguilar', 'oscar123', '001-090877-0033G'],
+      ['u-ges-mga-jairo', 'Jairo Esaan Picado Ruiz', 'Managua', 'jairo.picado', 'jairo123', '001-190973-0044T'],
+      ['u-ges-mga-danny', 'Danny Johanci García Gutiérrez', 'Managua', 'danny.garcia', 'danny123', '001-200102-1046T'],
+      ['u-ges-mga-jorge', 'Jorge Ariel Rodríguez Cabrera', 'Managua', 'jorge.rodriguez', 'jorge123', '001-220594-0017F'],
+      ['u-ges-mga-elvis', 'Elvis Ernesto Castillo', 'Managua', 'elvis.castillo', 'elvis123', '001-080388-0020X'],
+      ['u-ges-mga-alvaro', 'Álvaro Antonio Mora Lacayo', 'Managua', 'alvaro.mora', 'alvaro123', '001-210586-0062V'],
+      // Masaya (7: 5 Oficiales + 2 Oficiales de Desembolso)
       ['u-ges-mas-pedro', 'Pedro José Góngora Martínez', 'Masaya', 'pedro.gongora', 'pedro123', '401-311289-0005R'],
       ['u-ges-mas-diego', 'Diego Armando Mendoza Ugarte', 'Masaya', 'diego.mendoza', 'diego123', '601-280694-0000R'],
       ['u-ges-mas-gerson', 'Gerson Misael Bermúdez Díaz', 'Masaya', 'gerson.bermudez', 'gerson123', '401-260490-0001T'],
       ['u-ges-mas-ramon', 'Ramón Olegario Poveda Salgado', 'Masaya', 'ramon.poveda', 'ramon123', '403-290696-0000P'],
       ['u-ges-mas-jonathan', 'Jonathan Alejandro Méndez Navarro', 'Masaya', 'jonathan.mendez', 'jonathan123', '201-110985-0003U'],
-      // Rivas (5)
+      ['u-ges-mas-julio', 'Julio César Madriz Martínez', 'Masaya', 'julio.madriz', 'julio123', '401-151297-1005A'],
+      ['u-ges-mas-danny', 'Danny Valentín Zúñiga Pérez', 'Masaya', 'danny.zuniga', 'danny123', '401-140298-1007E'],
+      // Rivas (6: 5 Oficiales + 1 Supervisor)
       ['u-ges-riv-luis', 'Luis Enrique Solís Solís', 'Rivas', 'luis.solis', 'luis123', '561-130695-0003L'],
       ['u-ges-riv-wendy', 'Wendy Patricia López Pérez', 'Rivas', 'wendy.lopez', 'wendy123', '561-170304-1000D'],
       ['u-ges-riv-eduardo', 'Eduardo José Rosales García', 'Rivas', 'eduardo.rosales', 'eduardo123', '561-230603-1001S'],
       ['u-ges-riv-alvaro', 'Alvaro Wuesly Ulloa Hernández', 'Rivas', 'alvaro.ulloa', 'alvaro123', '561-071092-0005S'],
       ['u-ges-riv-junior', 'Junior Condega Meza', 'Rivas', 'junior.condega', 'junior123', '569-170802-1003P'],
-      // Sébaco (3)
+      ['u-ges-riv-ana', 'Ana Patricia Hernández Bonilla', 'Rivas', 'ana.hernandez', 'ana123', '561-140989-0003Q'],
+      // Sébaco (6: 5 Oficiales + 1 Supervisor)
       ['u-ges-seb-jorge', 'Jorge Luis Pérez García', 'Sébaco', 'jorge.perez', 'jorge123', '523-280590-0000A'],
       ['u-ges-seb-horacio', 'Horacio Javier Vallejos Tórrez', 'Sébaco', 'horacio.vallejos', 'horacio123', '441-070994-0002K'],
-      ['u-ges-seb-nerlin', 'Nerlin Javier Escoto Hernández', 'Sébaco', 'nerlin.escoto', 'nerlin123', '441-300585-0001G'],
+      ['u-ges-seb-asbell', 'Asbell Eleazar Martínez Alarcón', 'Sébaco', 'asbell.martinez', 'asbell123', '161-141003-1003U'],
+      ['u-ges-seb-jairo', 'Jairo Rappaccioli Martínez', 'Sébaco', 'jairo.rappaccioli', 'jairo123', '441-180581-0009L'],
+      ['u-ges-seb-einar', 'Einar Josep Orozco Balmaceda', 'Sébaco', 'einar.orozco', 'einar123', '441-200802-1005W'],
+      ['u-ges-seb-yuri', 'Yuri Cristel Herrera Arteta', 'Sébaco', 'yuri.herrera', 'yuri123', '241-211096-1002U'],
     ].forEach(([id, n, suc, u, p, ced]) => { ges[id] = U(id, n, 'gestor', suc, u, p, '', ced); });
 
     const base = Date.now();
@@ -1472,7 +1492,7 @@
     }
     // keep a few unread so the bell shows a counter, but don't flood toasts on first open
     s.notificaciones.forEach((n) => { n.toasted = true; n.leida = Date.now() - new Date(n.ts) > 2.5 * 864e5; });
-    auditar(s, admin, 'Sistema inicializado', 'Base oficial de 59 colaboradores activos (17/11/2026) cargada en AlfaTrack.');
+    auditar(s, admin, 'Sistema inicializado', 'Base oficial de 79 colaboradores activos (Cartilla Oficial RRHH) cargada en AlfaTrack.');
     return s;
   }
 
@@ -1490,10 +1510,10 @@
 
     s.usuarios = Array.isArray(s.usuarios) ? s.usuarios : [];
     const scoped = Boolean(opts.scoped || s._scoped);
-    const needsRealRosterV3 = !s.realRosterV3 && !scoped;
+    const needsRealRosterV4 = !s.realRosterV4 && !scoped;
 
-    if (needsRealRosterV3) {
-      // One-time cleanup: replace legacy/demo roster with the verified 59-person real roster,
+    if (needsRealRosterV4) {
+      // One-time cleanup: replace legacy roster with the verified 79-person real HR roster,
       // preserving custom passwords already configured on matching user IDs.
       const prevById = new Map(s.usuarios.map((u) => [u.id, u]));
       s.usuarios = base.usuarios.map((bu) => {
@@ -1534,7 +1554,7 @@
     }
 
     s.prospectos = Array.isArray(s.prospectos) ? s.prospectos : (scoped ? [] : base.prospectos);
-    if (needsRealRosterV3) {
+    if (needsRealRosterV4) {
       s.prospectos.forEach((p) => {
         const uOrig = byId.get(p.promotor_origen_id);
         if (uOrig) p.promotor_nombre = uOrig.nombre;
@@ -1542,6 +1562,7 @@
     }
     s.officialPromotersV2 = true;
     s.realRosterV3 = true;
+    s.realRosterV4 = true;
     s.notificaciones = Array.isArray(s.notificaciones) ? s.notificaciones : (scoped ? [] : base.notificaciones);
     s.auditoria = Array.isArray(s.auditoria) ? s.auditoria : (scoped ? [] : base.auditoria);
     return s;

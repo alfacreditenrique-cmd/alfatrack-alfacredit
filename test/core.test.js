@@ -7,14 +7,15 @@ const U = (s, id) => s.usuarios.find((u) => u.id === id);
 const P = (s, nombre) => s.prospectos.find((p) => p.nombre === nombre);
 const datos = (o) => Object.assign({ nombre: 'Cliente Prueba', telefono: '8000-0001', direccion: 'X', negocio: 'Pulpería', monto: 1000 }, o);
 
-test('seed: exact 59 real collaborators, >=8 prospects covering every state, all operational branches covered', () => {
+test('seed: exact 79 real collaborators, >=8 prospects covering every state, all operational branches covered', () => {
   const s = fresh();
-  assert.strictEqual(s.usuarios.length, 59);
+  assert.strictEqual(s.usuarios.length, 79);
   assert.strictEqual(s.usuarios.filter((u) => u.rol === 'admin').length, 1);
   assert.strictEqual(s.usuarios.filter((u) => u.rol === 'callcenter').length, 3);
   assert.strictEqual(s.usuarios.filter((u) => u.rol === 'gerente').length, 8);
-  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'promotor').length, 14);
-  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'gestor').length, 33);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'promotor').length, 13);
+  assert.strictEqual(s.usuarios.filter((u) => u.rol === 'gestor').length, 54);
+  assert.strictEqual(s.usuarios.find((u) => u.username === 'luis.mendez').cedula, '001-231200-1055G');
   assert.ok(s.prospectos.length >= 8);
   C.ESTADOS.forEach((e) => assert.ok(s.prospectos.some((p) => p.estado === e), e));
   ['Estelí', 'Managua', 'Masaya', 'León', 'Juigalpa', 'Sébaco', 'Jinotepe', 'Rivas'].forEach((suc) => {
@@ -222,7 +223,7 @@ test('adversarial edge cases: cédula length, disbursement amount, inactive gest
   assert.ok(!C.guardarConfig(s, admin, badTpl).ok);
 });
 
-test('authentication & credentials: admin/admin123 + all 59 real staff authenticate and old demo accounts are removed', () => {
+test('authentication & credentials: admin/admin123 + all 79 real staff authenticate and old/removed accounts are rejected', () => {
   const s = fresh();
   const usernames = new Set();
   for (const u of s.usuarios) {
@@ -236,14 +237,15 @@ test('authentication & credentials: admin/admin123 + all 59 real staff authentic
   assert.ok(rAdmin.ok, rAdmin.error);
   assert.strictEqual(rAdmin.usuario.rol, 'admin');
 
-  // Wrong password & removed demo accounts rejected
+  // Wrong password & removed accounts rejected
   assert.ok(!C.autenticar(s, 'admin', 'wrongpass').ok);
   assert.ok(!C.autenticar(s, 'karla.mendoza', 'karla123').ok);
   assert.ok(!C.autenticar(s, 'laura.varela', 'laura123').ok);
-  assert.ok(!C.autenticar(s, 'ernesto.vilchez', 'ernesto123').ok);
+  assert.ok(!C.autenticar(s, 'carlos.rivera', 'carlos123').ok);
+  assert.ok(!C.autenticar(s, 'nerlin.escoto', 'nerlin123').ok);
   assert.ok(!C.autenticar(s, '', '').ok);
 
-  // Real agents, managers, promoters, and credit officers authenticate properly
+  // Real agents, managers, promoters, and credit officers (incl. supervisores & oficiales de desembolso as gestor) authenticate properly
   for (const [u, p, rol, suc] of [
     ['betsy.ruiz', 'betsy123', 'callcenter', 'Casa Matriz'],
     ['xochil.torrez', 'xochil123', 'callcenter', 'Casa Matriz'],
@@ -261,11 +263,14 @@ test('authentication & credentials: admin/admin123 + all 59 real staff authentic
     ['nydia.sanchez', 'nydia123', 'promotor', 'Jinotepe'],
     ['martha.centeno', 'martha123', 'promotor', 'Juigalpa'],
     ['araceli.juarez', 'araceli123', 'promotor', 'León'],
-    ['juan.salinas', 'juan123', 'promotor', 'León'],
     ['lorena.castillo', 'lorena123', 'promotor', 'León'],
     ['evelia.diaz', 'evelia123', 'promotor', 'Sébaco'],
     ['jiurem.luna', 'jiurem123', 'promotor', 'Sébaco'],
-    ['carlos.rivera', 'carlos123', 'gestor', 'Estelí'],
+    ['juan.salinas', 'juan123', 'gestor', 'León'],
+    ['oscar.aguilar', 'oscar123', 'gestor', 'Managua'],
+    ['jaqueline.soza', 'jaqueline123', 'gestor', 'León'],
+    ['janhson.picado', 'janhson123', 'gestor', 'Estelí'],
+    ['julio.madriz', 'julio123', 'gestor', 'Masaya'],
     ['diego.mendoza', 'diego123', 'gestor', 'Masaya'],
     ['wendy.lopez', 'wendy123', 'gestor', 'Rivas'],
   ]) {

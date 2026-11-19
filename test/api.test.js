@@ -93,7 +93,7 @@ test('POST /api/auth/login signs HMAC-SHA256 tokens and scopes state strictly by
   assert.ok(okAdmin.data.token.startsWith('at_tok_'));
   assert.ok(okAdmin.data.token.includes('.'), 'token must carry HMAC signature segment');
   assert.strictEqual(okAdmin.data.usuario.rol, 'admin');
-  assert.strictEqual(okAdmin.data.state.usuarios.length, 59);
+  assert.strictEqual(okAdmin.data.state.usuarios.length, 79);
 
   // Non-admin promoter receives role-scoped state: NO passwords, NO other promoters' prospects, NO audit log
   const okPro = await api('/api/auth/login', { body: { username: 'claudia.suazo', password: 'claudia123' } });
@@ -215,7 +215,7 @@ test('Database manager API: strict auth + admin-only enforcement, real SQL error
 
   const stats = await api('/api/db/stats', { token: admin.token });
   assert.strictEqual(stats.status, 200);
-  assert.ok(stats.data.tables.some((t) => t.name === 'alfatrack_usuarios' && t.rows === 59));
+  assert.ok(stats.data.tables.some((t) => t.name === 'alfatrack_usuarios' && t.rows === 79));
 
   const tbl = await api('/api/db/table?name=alfatrack_usuarios&limit=10', { token: admin.token });
   assert.strictEqual(tbl.status, 200);
@@ -281,8 +281,8 @@ test('upgradeState migrates legacy roster to realRosterV3 once and preserves sub
       { id: 'p-1', nombre: 'Cliente 1', telefono: '88881111', promotor_origen_id: 'u-pro-leo-araceli', promotor_nombre: 'ARACELY JUÁREZ', sucursal: 'León', estado: 'nuevo', creado: new Date().toISOString(), actualizado: new Date().toISOString(), historial: [] },
     ],
   });
-  assert.strictEqual(legacy.realRosterV3, true);
-  assert.strictEqual(legacy.usuarios.length, 59);
+  assert.strictEqual(legacy.realRosterV4, true);
+  assert.strictEqual(legacy.usuarios.length, 79);
   assert.strictEqual(legacy.usuarios.find((u) => u.username === 'karla.mendoza'), undefined, 'old demo user removed');
   const adm = legacy.usuarios.find((u) => u.id === 'u-admin');
   assert.strictEqual(adm.password, 'customAdminPassword123', 'preserves custom password during migration');
