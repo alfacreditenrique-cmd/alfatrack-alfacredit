@@ -304,6 +304,58 @@ try {
     };`);
   assert.ok(r.title && r.noRawTursoError, JSON.stringify(r));
 
+  // 10. Unified Call Center Directo -> Branch Manager Distribution -> Assigned Promoter Note -> Admin Traceability Metrics
+  await send('Page.navigate', { url: targetUrl }); await sleep(900);
+  r = await ev(H + `
+    // 10a. Call Center (betsy.ruiz) registers a Directo a Gerencia lead (no street promoter)
+    await loginAs('betsy.ruiz', 'betsy123');
+    click('.tabs button', 'Captura Call Center');
+    const fc = $('form[data-form=captura-cc-directo]');
+    if (!fc) throw new Error('Directo form not shown by default');
+    set(fc.sucursal, 'Estelí');
+    const autoEmail = fc.emailGerente.value;
+    set(fc.nombre, 'Cliente Directo CC E2E');
+    set(fc.telefono, '83334455');
+    set(fc.monto, '22000');
+    set(fc.negocio, 'Pulpería');
+    set(fc.direccion, 'Estelí, barrio central');
+    set(fc.notas, 'Interesada vía Facebook');
+    fc.requestSubmit();
+    await waitFor(() => !!cardOf('Cliente Directo CC E2E'));
+
+    // 10b. Gerente Estelí sees the Directo case, filters by Directo Call Center, distributes to Carlos Rivera + Danilo Herrera
+    await loginAs('gerente.esteli', 'esteli123');
+    click('[data-action=ger-origen][data-val=callcenter_directo]');
+    const gc = cardOf('Cliente Directo CC E2E');
+    if (!gc) throw new Error('Gerente Estelí did not see Directo CC case');
+    const hasCCSeal = gc.textContent.includes('CASO DIRECTO CALL CENTER');
+    gc.querySelector('[data-pre=seguimiento]').click();
+    const fe = $('form[data-form=estado]');
+    set(fe.asignadoPromotorId, 'u-pro-esteli');
+    set(fe.gestorId, 'u-ges-esteli');
+    set(fe.instrucciones, 'Carlos y Danilo coordinar visita hoy.');
+    fe.requestSubmit();
+    await waitFor(() => !$('.modal'));
+
+    // 10c. Assigned promoter (carlos.rivera) sees distributed CC Directo case and adds follow-up note
+    await loginAs('carlos.rivera', 'carlos123');
+    const pc = cardOf('Cliente Directo CC E2E');
+    if (!pc) throw new Error('Assigned promoter did not see distributed CC Directo case');
+    pc.querySelector('[data-action=ver]').click();
+    const fn = $('form[data-form=nota]');
+    set(fn.texto, 'Cliente contactada, visita confirmada 3pm.');
+    fn.requestSubmit();
+    await waitFor(() => $('.modal .timeline').textContent.includes('visita confirmada 3pm'));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+    // 10d. Admin sees Call Center Directo traceability section in Métricas
+    await loginAs('admin', 'admin123');
+    click('.tabs button', 'Métricas');
+    const hasCCMetrics = $('#app').textContent.includes('Trazabilidad Call Center Directo') && $('#app').textContent.includes('Betsy Ruiz');
+    return { autoEmail, hasCCSeal, hasCCMetrics };`);
+  assert.strictEqual(r.autoEmail, 'gerenteesteli7@gmail.com');
+  assert.ok(r.hasCCSeal && r.hasCCMetrics, JSON.stringify(r));
+
   assert.deepStrictEqual(errors, [], 'no console errors');
   console.log('E2E OK');
 } catch (e) {

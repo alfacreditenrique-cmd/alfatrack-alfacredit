@@ -8,9 +8,11 @@ const fs = require('node:fs');
 process.env.ALFATRACK_DB_MODE = 'local';
 process.env.ALFATRACK_DB_FILE = path.join(os.tmpdir(), `alfatrack_api_test_${Date.now()}.json`);
 process.env.ALFATRACK_SESSION_SECRET = 'test-hmac-secret-alfatrack-2026';
+process.env.ALFATRACK_INTEGRATION_KEY = 'test-cc-integration-key-2026';
 
 const { createServer } = require('../server.js');
 const DB = require('../db.js');
+const SheetsBridge = require('../sheets-bridge.js');
 
 let srv, baseUrl;
 
@@ -68,7 +70,7 @@ test('GET /api/health returns only safe metadata; unauthenticated /api/state ret
     assert.ok(html.includes('AlfaTrack'));
   }
   // Private credential files and backend source files must not be served over HTTP
-  for (const blocked of ['/CREDENCIALES_ALFATRACK.txt', '/CREDENCIALES_USUARIOS.md', '/db.js', '/server.js', '/package.json', '/.env.local']) {
+  for (const blocked of ['/CREDENCIALES_ALFATRACK.txt', '/CREDENCIALES_USUARIOS.md', '/db.js', '/sheets-bridge.js', '/server.js', '/package.json', '/.env.local']) {
     const r = await fetch(baseUrl + blocked);
     assert.strictEqual(r.status, 403, `expected 403 for ${blocked}, got ${r.status}`);
   }
@@ -349,4 +351,397 @@ test('POST /api/mutate handles concurrent requests from two promoters without lo
   const st = await api('/api/state', { token: admin.token });
   assert.ok(st.data.state.prospectos.some((p) => p.nombre === 'Concurrente Uno'));
   assert.ok(st.data.state.prospectos.some((p) => p.nombre === 'Concurrente Dos'));
+});
+
+test('Call Center unification API: Python ingest (idempotent, auth, branch routing) + Web capture <-> Google Sheets bidirectional sync', async () => {
+  const sheetsCalls = [];
+  let nextMockRow = 205;
+  let failNextAppend = false;
+
+  SheetsBridge.setTransport(async (req) => {
+    sheetsCalls.push(req);
+    if (req.op === 'append') {
+      await new Promise((r) => setTimeout(r, 30));
+      if (failNextAppend) {
+        failNextAppend = false;
+        return { ok: false, error: 'Simulated Google Sheets timeout' };
+      }
+      const row = nextMockRow++;
+      return { ok: true, sheetRow: row, range: `Clientes!A${row}:J${row}`, values: req.values };
+    }
+    if (req.op === 'update_followup') {
+      return { ok: true, sheetRow: req.row, range: `Clientes!K${req.row}:O${req.row}`, values: req.values };
+    }
+    return { ok: false, error: 'Unknown op' };
+  });
+
+  try {
+    const betsy = await login('betsy.ruiz', 'betsy123');
+    const gerEsteli = await login('gerente.esteli', 'esteli123');
+    const proEsteli = await login('carlos.rivera', 'carlos123');
+    const admin = await login('admin', 'admin123');
+
+    // 1. Auth enforcement on /api/integrations/callcenter/ingest and /status
+    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { body: { nombre: 'Sin Auth', telefono: '81119999', sucursal: 'Estelí' } })).status, 401);
+    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { headers: { 'X-AlfaTrack-Key': 'wrong-key' }, body: { nombre: 'Bad Key', telefono: '81119999', sucursal: 'Estelí' } })).status, 401);
+    assert.strictEqual((await api('/api/integrations/callcenter/ingest', { token: proEsteli.token, body: { nombre: 'Promotor No', telefono: '81119999', sucursal: 'Estelí' } })).status, 403);
+    assert.strictEqual((await api('/api/integrations/callcenter/status')).status, 401);
+    assert.strictEqual((await api('/api/integrations/callcenter/status', { token: proEsteli.token })).status, 403);
+
+    // 2. Python app pushes a new Call Center case via X-AlfaTrack-Key (must NOT echo back to Google Sheets!)
+    const ing1 = await api('/api/integrations/callcenter/ingest', {
+      headers: { 'X-AlfaTrack-Key': process.env.ALFATRACK_INTEGRATION_KEY },
+      body: {
+        externalId: 'cc-py-r180-test',
+        sheetRow: 180,
+        agente: 'Xochilt',
+        nombre: 'Sofía Martínez Python',
+        tipoCredito: 'NV(NUEVO)',
+        telefono: '8444-5566',
+        direccion: 'Estelí, Barrio Central',
+        negocio: 'Comedor / Fritanga',
+        emailGerente: 'gerenteesteli7@gmail.com',
+        sucursal: 'Sucursal Esteli',
+        monto: 'C$ 18,000',
+        plataforma: 'Facebook',
+        detalle: 'Campaña Crédito Rápido',
+      },
+    });
+    assert.strictEqual(ing1.status, 201, JSON.stringify(ing1.data));
+    assert.strictEqual(ing1.data.ok, true);
+    assert.strictEqual(ing1.data.deduplicated, false);
+    assert.strictEqual(ing1.data.prospecto.sucursal, 'Estelí');
+    assert.strictEqual(ing1.data.prospecto.estado, 'pescado');
+    assert.strictEqual(ing1.data.prospecto.sheetSync.sheetRow, 180);
+    assert.strictEqual(sheetsCalls.length, 0, 'ingest from Python must NOT write duplicate row back to Google Sheets');
+
+    // Idempotent replay -> 200 deduplicated
+    const ingReplay = await api('/api/integrations/callcenter/ingest', {
+      headers: { 'X-AlfaTrack-Key': process.env.ALFATRACK_INTEGRATION_KEY },
+      body: {
+        externalId: 'cc-py-r180-test',
+        sheetRow: 180,
+        agente: 'Xochilt',
+        nombre: 'Sofía Martínez Python',
+        telefono: '8444-5566',
+        sucursal: 'Sucursal Esteli',
+      },
+    });
+    assert.strictEqual(ingReplay.status, 200);
+    assert.strictEqual(ingReplay.data.deduplicated, true);
+    assert.strictEqual(ingReplay.data.prospecto.id, ing1.data.prospecto.id);
+
+    // Different case with same phone -> 409 duplicate
+    const ingDupPhone = await api('/api/integrations/callcenter/ingest', {
+      headers: { 'X-AlfaTrack-Key': process.env.ALFATRACK_INTEGRATION_KEY },
+      body: {
+        externalId: 'cc-py-r181-dup',
+        sheetRow: 181,
+        agente: 'Eva',
+        nombre: 'Otra Persona',
+        telefono: '84445566',
+        sucursal: 'Sucursal Managua',
+      },
+    });
+    assert.strictEqual(ingDupPhone.status, 409);
+    assert.strictEqual(ingDupPhone.data.duplicate, true);
+
+    // Branch Manager sees Python lead immediately; promoter does NOT until distributed
+    const gerState = await api('/api/state', { token: gerEsteli.token });
+    assert.ok(gerState.data.state.prospectos.some((p) => p.id === ing1.data.prospecto.id));
+    const proStateBefore = await api('/api/state', { token: proEsteli.token });
+    assert.ok(!proStateBefore.data.state.prospectos.some((p) => p.id === ing1.data.prospecto.id));
+
+    // 3. Dual entry: Call Center creates Directo lead INSIDE AlfaTrack Web -> appends to Google Sheets (triggering manager email!)
+    const webCC = await api('/api/mutate', {
+      token: betsy.token,
+      body: {
+        action: 'capturarCasoCallCenterDirecto',
+        payload: {
+          nombre: 'Roberto Sánchez Web',
+          telefono: '8444-7788',
+          sucursal: 'Estelí',
+          tipoCredito: 'RP(REPRESTAMO)',
+          monto: 25000,
+          negocio: 'Taller',
+          direccion: 'Estelí, salida norte',
+          plataforma: 'Whatsapp',
+          campana: 'WhatsApp Directo',
+          notas: 'Solicita visita mañana',
+        },
+      },
+    });
+    assert.strictEqual(webCC.status, 200, JSON.stringify(webCC.data));
+    const pWeb = webCC.data.result.prospecto;
+    assert.strictEqual(pWeb.estado, 'pescado');
+    assert.strictEqual(pWeb.sheetSync.status, 'synced');
+    assert.strictEqual(pWeb.sheetSync.sheetRow, 205);
+    assert.strictEqual(sheetsCalls.length, 1);
+    assert.strictEqual(sheetsCalls[0].op, 'append');
+    assert.strictEqual(sheetsCalls[0].values[0], 'Betsy Ruiz');
+    assert.strictEqual(sheetsCalls[0].values[2], 'Roberto Sánchez Web');
+    assert.strictEqual(sheetsCalls[0].values[7], 'gerenteesteli7@gmail.com');
+    assert.strictEqual(sheetsCalls[0].values[8], 'Sucursal Esteli');
+    assert.strictEqual(sheetsCalls[0].values[9], 'C$ 25,000');
+
+    // 4. Branch Manager distributes the Web Call Center lead to Carlos Rivera -> updates AlfaTrack AND syncs K:O in Google Sheets!
+    const dist = await api('/api/mutate', {
+      token: gerEsteli.token,
+      body: {
+        action: 'cambiarEstado',
+        payload: {
+          id: pWeb.id,
+          estado: 'seguimiento',
+          datos: {
+            asignadoPromotorId: proEsteli.usuario.id,
+            instrucciones: 'Carlos, contactar hoy y evaluar taller.',
+          },
+        },
+      },
+    });
+    assert.strictEqual(dist.status, 200, JSON.stringify(dist.data));
+    assert.strictEqual(sheetsCalls.length, 2);
+    assert.strictEqual(sheetsCalls[1].op, 'update_followup');
+    assert.strictEqual(sheetsCalls[1].row, 205);
+    assert.strictEqual(sheetsCalls[1].values[0], 'Proceso');
+    assert.match(sheetsCalls[1].values[1], /Carlos, contactar hoy/);
+    assert.strictEqual(sheetsCalls[1].values[2], 'Carlos Rivera');
+
+    // Promoter now sees distributed lead and can add follow-up note (which also syncs K:O!)
+    const proStateAfter = await api('/api/state', { token: proEsteli.token });
+    assert.ok(proStateAfter.data.state.prospectos.some((p) => p.id === pWeb.id));
+    const noteRes = await api('/api/mutate', {
+      token: proEsteli.token,
+      body: { action: 'agregarNota', payload: { id: pWeb.id, texto: 'Visitado, documentación completa.' } },
+    });
+    assert.strictEqual(noteRes.status, 200);
+    assert.strictEqual(sheetsCalls.length, 3);
+    assert.match(sheetsCalls[2].values[1], /Visitado, documentación completa/);
+
+    // Manager closes as desembolsado -> syncs Desembolsado + monto to Google Sheets!
+    const closeRes = await api('/api/mutate', {
+      token: gerEsteli.token,
+      body: { action: 'cambiarEstado', payload: { id: pWeb.id, estado: 'desembolsado', datos: { monto: 25000 } } },
+    });
+    assert.strictEqual(closeRes.status, 200);
+    assert.strictEqual(sheetsCalls.length, 4);
+    assert.strictEqual(sheetsCalls[3].values[0], 'Desembolsado');
+    assert.strictEqual(sheetsCalls[3].values[3], 25000);
+
+    // 5. Resilience: transient Google Sheets failure still saves AlfaTrack lead; manager moves it to seguimiento + note;
+    //    concurrent reintentarSyncSheet calls append ONLY ONCE AND immediately chain K:O follow-up sync!
+    failNextAppend = true;
+    const webFail = await api('/api/mutate', {
+      token: betsy.token,
+      body: {
+        action: 'capturarCasoCallCenterDirecto',
+        payload: { nombre: 'Cliente Reintento Sheet', telefono: '8444-9900', sucursal: 'Estelí', monto: 12000 },
+      },
+    });
+    assert.strictEqual(webFail.status, 200);
+    const pRetryId = webFail.data.result.prospecto.id;
+    assert.strictEqual(webFail.data.result.prospecto.sheetSync.status, 'error');
+
+    // Manager distributes BEFORE Sheets append recovers
+    const distBeforeRetry = await api('/api/mutate', {
+      token: gerEsteli.token,
+      body: {
+        action: 'cambiarEstado',
+        payload: { id: pRetryId, estado: 'seguimiento', datos: { asignadoPromotorId: proEsteli.usuario.id, instrucciones: 'Llamar en cuanto vuelva Sheets' } },
+      },
+    });
+    assert.strictEqual(distBeforeRetry.status, 200);
+
+    const callsBeforeRetry = sheetsCalls.length;
+    // Fire two concurrent retry clicks -> must only append ONCE and must chain update_followup for K:O!
+    const [retry1, retry2] = await Promise.all([
+      api('/api/mutate', { token: betsy.token, body: { action: 'reintentarSyncSheet', payload: { id: pRetryId } } }),
+      api('/api/mutate', { token: betsy.token, body: { action: 'reintentarSyncSheet', payload: { id: pRetryId } } }),
+    ]);
+    assert.strictEqual(retry1.status, 200);
+    assert.strictEqual(retry2.status, 200);
+    assert.strictEqual(retry1.data.result.prospecto.sheetSync.status, 'synced');
+    assert.strictEqual(retry1.data.result.prospecto.sheetSync.sheetRow, 206);
+    const retryCalls = sheetsCalls.slice(callsBeforeRetry);
+    assert.strictEqual(retryCalls.filter((c) => c.op === 'append').length, 1, 'concurrent retries must NOT append duplicate rows');
+    assert.strictEqual(retryCalls.filter((c) => c.op === 'update_followup').length, 1, 'delayed append must chain K:O follow-up sync');
+    assert.strictEqual(retryCalls.find((c) => c.op === 'update_followup').values[0], 'Proceso');
+
+    // 6. Status endpoint reports accurate summary for Admin
+    const stCC = await api('/api/integrations/callcenter/status', { token: admin.token });
+    assert.strictEqual(stCC.status, 200);
+    assert.strictEqual(stCC.data.integrationKeyConfigured, true);
+    assert.strictEqual(stCC.data.stats.totalDirectos, 3);
+    assert.strictEqual(stCC.data.stats.syncedToSheet, 3);
+    assert.strictEqual(stCC.data.stats.fromPythonApp, 1);
+    assert.strictEqual(stCC.data.stats.fromWebApp, 2);
+  } finally {
+    SheetsBridge.setTransport(null);
+  }
+});
+
+test('SheetsBridge helpers: Managua timestamp, sheet row formatting, status mapping & local-mode live-call guard', async () => {
+  SheetsBridge.setTransport(null);
+  // In local test mode without mock transport, appendCallCenterRow must NOT hit real Google Sheets
+  const skipped = await SheetsBridge.appendCallCenterRow({
+    nombre: 'No Live Call', telefono: '88881111', sucursal: 'Estelí', monto: 5000,
+  });
+  assert.strictEqual(skipped.ok, false);
+  assert.strictEqual(skipped.skipped, true);
+
+  assert.strictEqual(SheetsBridge.formatDateManagua('2026-11-19T20:30:45.000Z'), '19/11/2026 14:30:45');
+  assert.strictEqual(SheetsBridge.formatTelefonoSheet('83633886', '77771111'), '8363-3886 / 7777-1111');
+  assert.strictEqual(SheetsBridge.formatMontoSheet(15000), 'C$ 15,000');
+  assert.strictEqual(SheetsBridge.formatMontoSheet(0), '-');
+  assert.strictEqual(SheetsBridge.mapEstadoToSheetStatus('pescado'), 'Pendiente');
+  assert.strictEqual(SheetsBridge.mapEstadoToSheetStatus('seguimiento'), 'Proceso');
+  assert.strictEqual(SheetsBridge.mapEstadoToSheetStatus('desembolsado'), 'Desembolsado');
+  assert.strictEqual(SheetsBridge.mapEstadoToSheetStatus('descartado'), 'Denegado');
+
+  const row = SheetsBridge.buildAppendRow({
+    cc: { agente: 'Eva', monto: 12000, rubro: 'Pulpería', direccionVisita: 'Barrio Sur' },
+    creado: '2026-11-19T20:30:45.000Z',
+    nombre: 'Ana Pérez',
+    tipoCredito: 'NV(NUEVO)',
+    telefono: '88991122',
+    emailGerente: 'gerentesebaco@gmail.com',
+    sucursal: 'Sébaco',
+  });
+  assert.deepStrictEqual(row, [
+    'Eva', '19/11/2026 14:30:45', 'Ana Pérez', 'NV(NUEVO)', '8899-1122',
+    'Barrio Sur', 'Pulpería', 'gerentesebaco@gmail.com', 'Sucursal Sebaco', 'C$ 12,000',
+  ]);
+
+  // Formula injection neutralization + multiline flattening (keeps '-' placeholder intact)
+  const dangerous = SheetsBridge.buildAppendRow({
+    cc: { agente: '=HYPERLINK("http://evil")', monto: 0, rubro: 'Taller\nCentral', direccionVisita: '+cmd|calc' },
+    creado: '2026-11-19T20:30:45.000Z',
+    nombre: '=IMPORTXML("http://x")',
+    tipoCredito: 'NV(NUEVO)',
+    telefono: '88991122',
+    emailGerente: 'gerentesebaco@gmail.com',
+    sucursal: 'Sébaco',
+  });
+  assert.strictEqual(dangerous[0], `'=HYPERLINK("http://evil")`);
+  assert.strictEqual(dangerous[2], `'=IMPORTXML("http://x")`);
+  assert.strictEqual(dangerous[5], `'+cmd|calc`);
+  assert.strictEqual(dangerous[6], 'Taller Central');
+  assert.strictEqual(dangerous[9], '-');
+
+  // Direct discard from pescado falls back to manager actor name in collaborator column
+  const fuDiscard = SheetsBridge.buildFollowUpRow({
+    estado: 'descartado',
+    motivoDescarte: 'No contesta',
+    gerencia: null,
+    historial: [
+      { rol: 'callcenter', usuario: 'Betsy Ruiz', accion: 'Caso Call Center Directo creado', detalle: '' },
+      { rol: 'gerente', usuario: 'Gerente Estelí', accion: 'Pescado → Descartado', detalle: 'Motivo: No contesta' },
+    ],
+    actualizado: '2026-11-19T21:00:00.000Z',
+  }, { usuarios: [] });
+  assert.strictEqual(fuDiscard[0], 'Denegado');
+  assert.strictEqual(fuDiscard[2], 'Gerente Estelí');
+});
+
+test('SheetsBridge live HTTP protocol: RS256 JWT cryptographic verification + OAuth2 -> Drive v3 -> Sheets v4 PUT A:J & K:O', async () => {
+  const crypto = require('node:crypto');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  const fakeCreds = {
+    client_email: 'test-sa@alfacredit-app.iam.gserviceaccount.com',
+    private_key: privateKey,
+    token_uri: 'https://oauth2.googleapis.com/token',
+  };
+
+  // 1. Verify RS256 JWT signature & claims directly against publicKey
+  const jwt = SheetsBridge.signServiceAccountJwt(fakeCreds);
+  const [hdrB64, claimB64, sigB64] = jwt.split('.');
+  assert.ok(hdrB64 && claimB64 && sigB64);
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${hdrB64}.${claimB64}`);
+  verifier.end();
+  const sigBuf = Buffer.from(sigB64.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  assert.strictEqual(verifier.verify(publicKey, sigBuf), true, 'JWT RS256 signature must verify');
+  const claims = JSON.parse(Buffer.from(claimB64, 'base64url').toString('utf8'));
+  assert.strictEqual(claims.iss, fakeCreds.client_email);
+  assert.match(claims.scope, /spreadsheets/);
+
+  // 2. Drive the real HTTP path with mocked globalThis.fetch (no real network traffic)
+  const origFetch = globalThis.fetch;
+  const origMode = process.env.ALFATRACK_SHEETS_MODE;
+  const origSa = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  const origId = process.env.GOOGLE_SHEETS_ID;
+  const calls = [];
+  let currentColC = [['Nombre'], ['Cliente 1'], ['Cliente 2']];
+
+  SheetsBridge.setTransport(null);
+  SheetsBridge.resetCaches();
+  process.env.ALFATRACK_SHEETS_MODE = 'live';
+  process.env.GOOGLE_SERVICE_ACCOUNT_JSON = JSON.stringify(fakeCreds);
+  delete process.env.GOOGLE_SHEETS_ID;
+
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    calls.push({ url: u, method: (opts && opts.method) || 'GET', body: opts && opts.body });
+    if (u.startsWith('https://oauth2.googleapis.com/token')) {
+      return new Response(JSON.stringify({ access_token: 'ya29.mock-token', expires_in: 3600 }), { status: 200 });
+    }
+    if (u.startsWith('https://www.googleapis.com/drive/v3/files')) {
+      return new Response(JSON.stringify({ files: [{ id: 'sheet-id-123', name: 'base de datos' }] }), { status: 200 });
+    }
+    if (u.includes('/values/') && (!opts || opts.method === 'GET')) {
+      return new Response(JSON.stringify({ values: currentColC }), { status: 200 });
+    }
+    if (u.includes('/values/') && opts && opts.method === 'PUT') {
+      const parsed = JSON.parse(opts.body);
+      if (parsed.range.includes('!A')) currentColC.push([parsed.values[0][2]]);
+      return new Response(JSON.stringify({ updatedRange: parsed.range, updatedRows: 1 }), { status: 200 });
+    }
+    return new Response('Not Found', { status: 404 });
+  };
+
+  try {
+    // Concurrent appends must serialize through appendLock and get distinct rows (#4 and #5)
+    const [a1, a2] = await Promise.all([
+      SheetsBridge.appendCallCenterRow({
+        cc: { agente: 'Betsy Ruiz', monto: 10000, rubro: 'Pulpería', direccionVisita: 'Centro' },
+        creado: '2026-11-19T20:30:45.000Z', nombre: 'Primero', tipoCredito: 'NV(NUEVO)',
+        telefono: '88001122', emailGerente: 'gerenteesteli7@gmail.com', sucursal: 'Estelí',
+      }),
+      SheetsBridge.appendCallCenterRow({
+        cc: { agente: 'Eva', monto: 15000, rubro: 'Taller', direccionVisita: 'Norte' },
+        creado: '2026-11-19T20:31:00.000Z', nombre: 'Segundo', tipoCredito: 'NV(NUEVO)',
+        telefono: '88003344', emailGerente: 'gerenteleon8@gmail.com', sucursal: 'León',
+      }),
+    ]);
+    assert.strictEqual(a1.ok, true, a1.error);
+    assert.strictEqual(a2.ok, true, a2.error);
+    assert.strictEqual(a1.sheetRow, 4);
+    assert.strictEqual(a2.sheetRow, 5, 'serialized concurrent appends must not collide on same row');
+    assert.strictEqual(calls.filter((c) => c.url.includes('oauth2.googleapis.com')).length, 1, 'OAuth token must be cached');
+    assert.strictEqual(calls.filter((c) => c.url.includes('drive/v3/files')).length, 1, 'Spreadsheet ID must be cached');
+
+    const fu = await SheetsBridge.updateCallCenterFollowUp({
+      estado: 'desembolsado',
+      desembolso: { monto: 10000 },
+      asignadoPromotorNombre: 'Carlos Rivera',
+      gerencia: { gerente: 'Gerente Estelí', instrucciones: 'Aprobado' },
+      sheetSync: { sheetRow: 4 },
+      actualizado: '2026-11-19T22:00:00.000Z',
+    }, { usuarios: [] });
+    assert.strictEqual(fu.ok, true, fu.error);
+    assert.strictEqual(fu.range, "'Clientes'!K4:O4");
+  } finally {
+    globalThis.fetch = origFetch;
+    if (origMode === undefined) delete process.env.ALFATRACK_SHEETS_MODE;
+    else process.env.ALFATRACK_SHEETS_MODE = origMode;
+    if (origSa === undefined) delete process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    else process.env.GOOGLE_SERVICE_ACCOUNT_JSON = origSa;
+    if (origId === undefined) delete process.env.GOOGLE_SHEETS_ID;
+    else process.env.GOOGLE_SHEETS_ID = origId;
+    SheetsBridge.resetCaches();
+  }
 });

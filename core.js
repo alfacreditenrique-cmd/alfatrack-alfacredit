@@ -14,9 +14,11 @@
   };
   const ESTADOS = ['nuevo', 'gestion', 'pescado', 'seguimiento', 'desembolsado', 'descartado'];
   const PASO = { nuevo: 1, gestion: 2, pescado: 3, seguimiento: 4, desembolsado: 5, descartado: 0 };
+  const ORIGEN_CC_ID = 'cc-directo';
+  const ORIGEN_CC_NOMBRE = 'Call Center Directo';
   const CAMPOS_EDITABLES = [
     'nombre', 'telefono', 'telefonoSecundario', 'cedula', 'tipoCredito',
-    'direccion', 'negocio', 'monto', 'plataforma', 'campana', 'notas', 'sucursal', 'gestorId',
+    'direccion', 'negocio', 'monto', 'plataforma', 'campana', 'notas', 'sucursal', 'gestorId', 'asignadoPromotorId',
   ];
 
   let clock = () => new Date();
@@ -57,6 +59,9 @@
         notif_gestion: 'Call Center ({agente}) está gestionando a tu cliente {cliente}.',
         notif_pescado_promotor: '¡Atención! Call Center ya calificó a tu cliente {cliente} y fue enviado a tu Gerente de Sucursal.',
         notif_pescado_gerente: 'Nuevo cliente pescado en {sucursal}: {cliente} (Promotor de origen: {promotor}). Monto: C$ {monto}.',
+        notif_cc_directo_gerente: '📞 Nuevo caso directo de Call Center ({agente}) en {sucursal}: {cliente} · Monto: C$ {monto}. Listo para distribuir.',
+        notif_cc_directo_asignado: '🏢 Gerencia ({actor}) te asignó el caso directo de Call Center: {cliente} ({sucursal}). Instrucciones: {instrucciones}',
+        notif_cc_directo_agente: '📌 Gerencia ({actor}) actualizó tu caso de Call Center {cliente} ({sucursal}) → {estado}. Responsable: {responsable}.',
         notif_seguimiento_promotor: 'Tu Gerente {actor} habilitó el seguimiento de {cliente}. Instrucciones: {instrucciones}',
         notif_seguimiento_gestor: 'Se te asignó como apoyo/evaluador del cliente {cliente} (Promotor de origen: {promotor}).',
         notif_desembolsado: '🎉 ¡Felicidades! El crédito de {cliente} fue DESEMBOLSADO y cuenta para tu meta.',
@@ -77,6 +82,122 @@
 
   const sinAcentos = (str) => String(str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const normUser = (str) => sinAcentos(str).toLowerCase().replace(/[^a-z0-9._-]/g, '');
+  const esCallCenterDirecto = (p) => Boolean(p && (p.origenTipo === 'callcenter_directo' || p.promotor_origen_id === ORIGEN_CC_ID));
+
+  function limpiarTelefonoCC(raw) {
+    const str = String(raw || '').trim();
+    if (!str || str === '-' || str.toLowerCase() === 'nan') return { telefono: '', telefonoSecundario: '' };
+    const cleanOne = (part) => {
+      let d = soloDigitos(part);
+      if (d.length === 11 && d.startsWith('505')) d = d.slice(3);
+      return d;
+    };
+    // 1. Split explicit multi-number separators (/, ;, ,, " y ", " - ", or two 8-digit blocks separated by hyphen/space)
+    const normalized = str.replace(/\b(\d{8})\s*[-–—]\s*(\d{8})\b/g, '$1 / $2');
+    const parts = normalized.split(/[\/,;]+|\s+-\s+|\s+y\s+|\s{2,}/i).map(cleanOne).filter(Boolean);
+    const valid = parts.filter((d) => d.length === 8);
+    if (valid.length) {
+      return { telefono: valid[0], telefonoSecundario: valid[1] && valid[1] !== valid[0] ? valid[1] : '' };
+    }
+    // 2. Fallback: extract distinct 8-digit Nicaraguan phone patterns (optionally prefixed with +505/505 or formatted XXXX-XXXX)
+    const matches = str.match(/(?:\+?505[\s-]?)?\d{4}[\s-]?\d{4}/g);
+    if (matches && matches.length) {
+      const extracted = matches.map(cleanOne).filter((d) => d.length === 8);
+      if (extracted.length) {
+        return { telefono: extracted[0], telefonoSecundario: extracted[1] && extracted[1] !== extracted[0] ? extracted[1] : '' };
+      }
+    }
+    return { telefono: cleanOne(str), telefonoSecundario: '' };
+  }
+
+  function parseMonto(raw) {
+    if (raw === undefined || raw === null) return '';
+    if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 ? raw : '';
+    const str = String(raw).trim();
+    if (!str || str === '-' || str.toLowerCase() === 'n/a') return '';
+    // Reject explicit negative amounts (e.g. "-500" or "C$ -500")
+    if (/(?:^|[^\d])-\s*\d/.test(str)) return '';
+    let cleaned = str.replace(/[^0-9.,]/g, '');
+    if (!cleaned) return '';
+    if (cleaned.includes(',') && cleaned.includes('.')) {
+      // If last separator is comma (e.g. 15.000,50), comma is decimal; otherwise comma is thousands (e.g. 15,000.50)
+      if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
+        cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+      } else {
+        cleaned = cleaned.replace(/,/g, '');
+      }
+    } else if (cleaned.includes('.')) {
+      // Handle Latin American thousands dots (e.g. 15.000 or 1.500.000) vs decimal (15000.50)
+      if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+        cleaned = cleaned.replace(/\./g, '');
+      }
+    } else if (cleaned.includes(',')) {
+      if (/^\d{1,3}(,\d{3})+$/.test(cleaned)) {
+        cleaned = cleaned.replace(/,/g, '');
+      } else {
+        cleaned = cleaned.replace(',', '.');
+      }
+    }
+    const n = Number(cleaned);
+    return Number.isFinite(n) && n > 0 ? n : '';
+  }
+
+  function normalizarSucursal(sucursalRaw, emailRaw, sucursalesPermitidas, emailsGerentesMap) {
+    const list = Array.isArray(sucursalesPermitidas) && sucursalesPermitidas.length
+      ? sucursalesPermitidas
+      : defaultConfig().sucursales;
+    const raw = sinAcentos(sucursalRaw || '').toLowerCase().replace(/^sucursal\s+/, '').trim();
+    const em = String(emailRaw || '').trim().toLowerCase();
+
+    if (raw) {
+      const exact = list.find((s) => sinAcentos(s).toLowerCase() === raw);
+      if (exact) return exact;
+      if (raw.includes('managua') || raw.includes('bolonia') || raw.includes('norte')) {
+        const m = list.find((s) => sinAcentos(s).toLowerCase() === 'managua');
+        if (m) return m;
+      }
+      if (raw.includes('administrador') || raw.includes('matriz')) {
+        const cm = list.find((s) => sinAcentos(s).toLowerCase() === 'casa matriz');
+        if (cm) return cm;
+      }
+      // Prefer full branch name contained in raw (e.g. "esteli centro" -> "Estelí"), or prefix/substring only for >= 4 chars
+      const contained = list.find((s) => raw.includes(sinAcentos(s).toLowerCase()));
+      if (contained) return contained;
+      if (raw.length >= 4) {
+        const prefix = list.find((s) => sinAcentos(s).toLowerCase().startsWith(raw));
+        if (prefix) return prefix;
+        const partial = list.find((s) => sinAcentos(s).toLowerCase().includes(raw));
+        if (partial) return partial;
+      }
+    }
+
+    if (em) {
+      const emailsMap = Object.assign({}, defaultConfig().emailsGerentes, emailsGerentesMap || {});
+      if (em.includes('managua')) {
+        const m = list.find((s) => sinAcentos(s).toLowerCase() === 'managua');
+        if (m) return m;
+      }
+      for (const [suc, mail] of Object.entries(emailsMap)) {
+        if (String(mail || '').toLowerCase() === em && list.includes(suc)) return suc;
+      }
+    }
+    return '';
+  }
+
+  function sucursalParaSheet(sucursal) {
+    const map = {
+      'Managua': 'Sucursal Managua',
+      'Estelí': 'Sucursal Esteli',
+      'Masaya': 'Sucursal Masaya',
+      'Rivas': 'Sucursal Rivas',
+      'Jinotepe': 'Sucursal Jinotepe',
+      'Juigalpa': 'Sucursal Juigalpa',
+      'Sébaco': 'Sucursal Sebaco',
+      'León': 'Sucursal León',
+      'Casa Matriz': 'Casa Matriz',
+    };
+    return map[sucursal] || (String(sucursal || '').startsWith('Sucursal') ? sucursal : `Sucursal ${sucursal}`);
+  }
 
   const nodeCrypto = (typeof require === 'function' && typeof window === 'undefined')
     ? (() => { try { return require('node:crypto'); } catch { return null; } })()
@@ -222,7 +343,7 @@
   function puedeVer(actor, p) {
     if (!actor || !p) return false;
     switch (actor.rol) {
-      case 'promotor': return p.promotor_origen_id === actor.id;
+      case 'promotor': return p.promotor_origen_id === actor.id || (Boolean(p.asignadoPromotorId) && p.asignadoPromotorId === actor.id);
       case 'callcenter': case 'admin': return true;
       case 'gerente': return p.sucursal === actor.sucursal;
       case 'gestor': return p.gestorId === actor.id;
@@ -257,6 +378,10 @@
   }
   function mensajeDuplicado(d) {
     const f = new Date(d.prospecto.creado).toLocaleString('es-NI', { dateStyle: 'medium', timeStyle: 'short' });
+    if (esCallCenterDirecto(d.prospecto)) {
+      const ag = (d.prospecto.cc && d.prospecto.cc.agente) ? ` (${d.prospecto.cc.agente})` : '';
+      return `Este ${d.campo} ya está registrado (cliente ${d.prospecto.nombre}) por Call Center Directo${ag} en ${d.prospecto.sucursal} el ${f}. No es posible registrarlo de nuevo.`;
+    }
     return `Este ${d.campo} ya está registrado (cliente ${d.prospecto.nombre}) por el promotor ${d.prospecto.promotor_nombre} (${d.prospecto.sucursal}) el ${f}. No es posible registrarlo de nuevo.`;
   }
 
@@ -309,12 +434,16 @@
     return { ok: true, prospecto: p };
   }
 
-  // Allows Call Center or Admin to register a lead captured from digital platforms/forms while locking the designated origin promoter.
+  // Allows Call Center or Admin to register a lead captured from digital platforms/forms while locking the designated origin promoter,
+  // OR route directly to the Branch Manager when modo === 'directo' (without a street promoter).
   function capturarProspectoCallCenter(s, actor, d) {
     if (!actor || !actor.activo || !['callcenter', 'admin', 'promotor'].includes(actor.rol)) {
       return err('No tiene permiso para capturar prospectos.');
     }
     if (actor.rol === 'promotor') return crearProspecto(s, actor, d);
+    if (d && (d.modo === 'directo' || d.origenTipo === 'callcenter_directo')) {
+      return capturarCasoCallCenterDirecto(s, actor, d);
+    }
     const promotor = user(s, d.promotorOrigenId);
     if (!promotor || promotor.rol !== 'promotor') return err('Seleccione el Promotor de Origen válido.');
     const e = validarDatos(s, d);
@@ -323,6 +452,7 @@
     const emailsGer = (s.config && s.config.emailsGerentes) || defaultConfig().emailsGerentes;
     const p = {
       id: uid('p'),
+      origenTipo: 'promotor',
       nombre: String(d.nombre).trim(),
       telefono: soloDigitos(d.telefono),
       telefonoSecundario: d.telefonoSecundario ? soloDigitos(d.telefonoSecundario) : '',
@@ -343,13 +473,140 @@
       creado: now(),
       actualizado: now(),
       cc: { agenteId: actor.id, agente: actor.nombre, intentos: 0, ultimaGestion: 'Capturado en Call Center' },
-      gerencia: null, gestorId: null, motivoDescarte: '',
+      gerencia: null, gestorId: null, asignadoPromotorId: null, asignadoPromotorNombre: '', motivoDescarte: '',
       historial: [],
     };
     log(p, actor, 'Prospecto creado', `Capturado por ${actor.nombre} (${ROLES[actor.rol]}). Candado de Origen asignado a ${promotor.nombre} (${promotor.sucursal}).`);
     s.prospectos.push(p);
     const notificaciones = notificar(s, [promotor.id].filter((x) => x !== actor.id), `📋 ${actor.nombre} registró a tu prospecto ${p.nombre} (${p.plataforma}) con tu Candado de Origen.`, p.id);
     return { ok: true, prospecto: p, notificaciones };
+  }
+
+  // Direct Call Center lead (captured in AlfaTrack OR ingested from the Python Call Center desktop app):
+  // No street promoter required; arrives directly at the corresponding Branch Manager in state 'pescado' for distribution & traceability.
+  function capturarCasoCallCenterDirecto(s, actor, d) {
+    d = d || {};
+    if (!actor || !actor.activo || !['callcenter', 'admin'].includes(actor.rol)) {
+      return err('Solo Call Center o Administrador puede registrar casos directos de Call Center.');
+    }
+
+    const externalId = String(d.externalId || '').trim();
+    const sheetRowNum = Number(d.sheetRow) > 1 ? Math.floor(Number(d.sheetRow)) : null;
+
+    // Idempotency guard: prevent duplicates on retries from Python app or webhook replays
+    if (externalId || sheetRowNum) {
+      const existing = s.prospectos.find((p) =>
+        (externalId && p.externalId && p.externalId === externalId) ||
+        (sheetRowNum && p.sheetSync && Number(p.sheetSync.sheetRow) === sheetRowNum)
+      );
+      if (existing) {
+        return { ok: true, deduplicated: true, prospecto: existing, notificaciones: [] };
+      }
+    }
+
+    const sucursalDestino = normalizarSucursal(
+      d.sucursal,
+      d.emailGerente,
+      s.config && s.config.sucursales,
+      s.config && s.config.emailsGerentes
+    );
+    if (!sucursalDestino) {
+      return err('Seleccione una sucursal destino válida para enviar al Gerente.');
+    }
+
+    const telParsed = limpiarTelefonoCC(d.telefono);
+    const telSecParsed = d.telefonoSecundario ? limpiarTelefonoCC(d.telefonoSecundario).telefono : telParsed.telefonoSecundario;
+    const montoParsed = parseMonto(d.monto);
+    const cleanData = {
+      nombre: String(d.nombre || '').trim(),
+      telefono: telParsed.telefono,
+      telefonoSecundario: telSecParsed || '',
+      cedula: d.cedula ? String(d.cedula).trim().toUpperCase() : '',
+      monto: montoParsed,
+    };
+
+    const e = validarDatos(s, cleanData);
+    if (e) {
+      const dup = buscarDuplicado(s, cleanData.telefono, cleanData.cedula);
+      if (dup) return Object.assign(err(e), { duplicate: true, existingId: dup.prospecto.id });
+      return err(e);
+    }
+
+    const emailsGer = (s.config && s.config.emailsGerentes) || defaultConfig().emailsGerentes;
+    const emailGerente = String(d.emailGerente || '').trim() || emailsGer[sucursalDestino] || 'alfacreditenrique@gmail.com';
+    const agenteNombre = String(d.agenteNombre || d.agente || actor.nombre || 'Call Center').trim();
+    const origenApp = d.origenApp === 'python_callcenter' ? 'python_callcenter' : 'alfatrack';
+    const tipoCredito = String(d.tipoCredito || 'NV(NUEVO)').trim();
+    const plataforma = String(d.plataforma || 'Whatsapp').trim();
+    const campana = String(d.campana || d.detalle || '').trim();
+    const negocio = String(d.negocio || d.tipoNegocio || '').trim();
+    const direccion = String(d.direccion || d.direccionNegocio || '').trim();
+    const notas = String(d.notas || '').trim();
+    const montoNum = Number(montoParsed) || 0;
+    const comentarioCC = notas || (campana ? `Captado vía ${plataforma} (${campana})` : `Caso directo captado por Call Center (${agenteNombre}) vía ${plataforma}.`);
+
+    const p = {
+      id: uid('p'),
+      origenTipo: 'callcenter_directo',
+      origenApp,
+      externalId: externalId || '',
+      nombre: cleanData.nombre,
+      telefono: cleanData.telefono,
+      telefonoSecundario: cleanData.telefonoSecundario,
+      cedula: cleanData.cedula,
+      tipoCredito,
+      direccion: direccion === '-' ? '' : direccion,
+      negocio: negocio === '-' ? '' : negocio,
+      monto: montoNum,
+      plataforma,
+      campana: campana === '-' ? '' : campana,
+      emailGerente,
+      notas: notas === '-' ? '' : notas,
+      // Origin locked as Call Center Directo (distinct from street-captured Promoter leads)
+      promotor_origen_id: ORIGEN_CC_ID,
+      promotor_nombre: ORIGEN_CC_NOMBRE,
+      sucursal_origen: sucursalDestino,
+      sucursal: sucursalDestino,
+      estado: 'pescado',
+      creado: now(),
+      actualizado: now(),
+      cc: {
+        agenteId: actor.id,
+        agente: agenteNombre,
+        intentos: 1,
+        monto: montoNum,
+        rubro: negocio === '-' ? '' : negocio,
+        direccionVisita: direccion === '-' ? '' : direccion,
+        comentarios: comentarioCC,
+        calificado: now(),
+        origenApp,
+      },
+      gerencia: null,
+      gestorId: null,
+      asignadoPromotorId: null,
+      asignadoPromotorNombre: '',
+      motivoDescarte: '',
+      sheetSync: sheetRowNum
+        ? { status: 'synced', sheetRow: sheetRowNum, source: origenApp, syncedAt: now(), emailAlertExpected: true, lastError: '' }
+        : { status: 'pending', sheetRow: null, source: origenApp, syncedAt: null, emailAlertExpected: true, lastError: '' },
+      historial: [],
+    };
+
+    const viaTxt = origenApp === 'python_callcenter'
+      ? `App Python Call Center${sheetRowNum ? ` (Google Sheets fila #${sheetRowNum})` : ''}`
+      : 'AlfaTrack Web (Call Center Directo)';
+    log(
+      p,
+      actor,
+      'Caso Call Center Directo creado',
+      `Captado por ${agenteNombre} vía ${viaTxt} (${p.plataforma} · ${p.tipoCredito}). Enviado directamente a Gerencia de ${sucursalDestino} (${emailGerente}) para distribución.`
+    );
+    s.prospectos.push(p);
+
+    const tplGer = (s.config && s.config.plantillas && s.config.plantillas.notif_cc_directo_gerente) || defaultConfig().plantillas.notif_cc_directo_gerente;
+    const msgGer = fill(tplGer, vars(s, p, actor, { agente: agenteNombre }));
+    const notificaciones = notificar(s, gerentesDe(s, sucursalDestino).filter((x) => x !== actor.id), msgGer, p.id);
+    return { ok: true, deduplicated: false, prospecto: p, notificaciones };
   }
 
   // ---------- CSV Depurador & Bulk Promoter Form Importer (from NUEVOS-CLIENTE.html) ----------
@@ -668,18 +925,69 @@
       detalle = `Calificado por ${actor.nombre}. Monto C$ ${monto.toLocaleString('es-NI')}, rubro ${p.cc.rubro}, visita: ${p.cc.direccionVisita}. Comentarios: ${p.cc.comentarios}`;
     } else if (estado === 'seguimiento') {
       const instrucciones = String(d.instrucciones || '').trim();
-      if (!instrucciones) return err('Escriba las instrucciones para el promotor.');
+      const esCCDirecto = esCallCenterDirecto(p);
+      if (!instrucciones) {
+        return err(esCCDirecto ? 'Escriba las instrucciones o plan de seguimiento.' : 'Escriba las instrucciones para el promotor.');
+      }
       let gestor = null;
       if (d.gestorId) {
         gestor = user(s, d.gestorId);
         if (!gestor || gestor.rol !== 'gestor' || !gestor.activo) return err('Gestor de crédito inválido.');
       }
+      let promotorAsig = null;
+      if (esCCDirecto && d.asignadoPromotorId) {
+        promotorAsig = user(s, d.asignadoPromotorId);
+        if (!promotorAsig || promotorAsig.rol !== 'promotor' || !promotorAsig.activo) {
+          return err('Promotor asignado inválido o dado de baja.');
+        }
+      }
       const gestorPrevio = p.gestorId;
       p.gestorId = gestor ? gestor.id : null;
-      p.gerencia = { gerenteId: actor.id, gerente: actor.nombre, instrucciones, asignado: now() };
-      detalle = `Seguimiento asignado al Promotor de Origen ${p.promotor_nombre}` + (gestor ? ` con apoyo del Gestor ${gestor.nombre}` : ' (sin gestor de apoyo)') + `. Instrucciones: ${instrucciones}`;
-      avisos.push([[p.promotor_origen_id], fill(cfg.notif_seguimiento_promotor, vars(s, p, actor))]);
-      if (gestor && gestor.id !== gestorPrevio) avisos.push([[gestor.id], fill(cfg.notif_seguimiento_gestor, vars(s, p, actor))]);
+
+      if (esCCDirecto) {
+        const promPrevio = p.asignadoPromotorId || null;
+        p.asignadoPromotorId = promotorAsig ? promotorAsig.id : null;
+        p.asignadoPromotorNombre = promotorAsig ? promotorAsig.nombre : '';
+
+        const responsables = [];
+        if (promotorAsig) responsables.push(`Promotor ${promotorAsig.nombre}`);
+        if (gestor) responsables.push(`Gestor ${gestor.nombre}`);
+        const responsableLabel = responsables.length ? responsables.join(' + ') : `Gerencia directa (${actor.nombre})`;
+        const tipoDistribucion = promotorAsig && gestor
+          ? 'promotor_y_gestor'
+          : promotorAsig
+            ? 'promotor'
+            : gestor
+              ? 'gestor'
+              : 'gerencia_directa';
+
+        p.gerencia = {
+          gerenteId: actor.id,
+          gerente: actor.nombre,
+          instrucciones,
+          asignado: now(),
+          asignadoA: responsableLabel,
+          tipoDistribucion,
+        };
+        detalle = `Caso Call Center Directo distribuido a: ${responsableLabel}. Instrucciones: ${instrucciones}`;
+
+        const tplAsig = cfg.notif_cc_directo_asignado || defaultConfig().plantillas.notif_cc_directo_asignado;
+        if (promotorAsig && (promotorAsig.id !== promPrevio || anterior !== estado)) {
+          avisos.push([[promotorAsig.id], fill(tplAsig, vars(s, p, actor))]);
+        }
+        if (gestor && (gestor.id !== gestorPrevio || anterior !== estado)) {
+          avisos.push([[gestor.id], fill(tplAsig, vars(s, p, actor))]);
+        }
+        if (p.cc && p.cc.agenteId && user(s, p.cc.agenteId)) {
+          const tplAg = cfg.notif_cc_directo_agente || defaultConfig().plantillas.notif_cc_directo_agente;
+          avisos.push([[p.cc.agenteId], fill(tplAg, vars(s, p, actor, { estado: etiqueta(s, estado), responsable: responsableLabel }))]);
+        }
+      } else {
+        p.gerencia = { gerenteId: actor.id, gerente: actor.nombre, instrucciones, asignado: now() };
+        detalle = `Seguimiento asignado al Promotor de Origen ${p.promotor_nombre}` + (gestor ? ` con apoyo del Gestor ${gestor.nombre}` : ' (sin gestor de apoyo)') + `. Instrucciones: ${instrucciones}`;
+        avisos.push([[p.promotor_origen_id], fill(cfg.notif_seguimiento_promotor, vars(s, p, actor))]);
+        if (gestor && gestor.id !== gestorPrevio) avisos.push([[gestor.id], fill(cfg.notif_seguimiento_gestor, vars(s, p, actor))]);
+      }
     } else if (estado === 'descartado') {
       const motivo = String(d.motivo || '').trim();
       if (!motivo) return err('El motivo de descarte es obligatorio.');
@@ -690,7 +998,12 @@
       const montoFinal = Number(d.monto) || (p.cc && p.cc.monto) || p.monto;
       if (!(montoFinal > 0)) return err('Indique el monto desembolsado.');
       p.desembolso = { monto: montoFinal, fecha: now(), por: actor.nombre };
-      detalle = `Monto desembolsado C$ ${Number(p.desembolso.monto).toLocaleString('es-NI')}. Comisión para ${p.promotor_nombre}.`;
+      if (esCallCenterDirecto(p)) {
+        const resp = (p.gerencia && p.gerencia.asignadoA) || actor.nombre;
+        detalle = `Monto desembolsado C$ ${Number(p.desembolso.monto).toLocaleString('es-NI')}. Caso Call Center Directo (atendido por ${resp}).`;
+      } else {
+        detalle = `Monto desembolsado C$ ${Number(p.desembolso.monto).toLocaleString('es-NI')}. Comisión para ${p.promotor_nombre}.`;
+      }
     } else if (estado === 'nuevo') {
       detalle = 'Regresado a cola de Call Center.';
     }
@@ -700,16 +1013,23 @@
     const accion = anterior === estado ? `Actualizado: ${etiqueta(s, estado)}` : `${etiqueta(s, anterior)} → ${etiqueta(s, estado)}`;
     log(p, actor, accion, detalle);
 
-    // Promotor de origen is notified every time the stage changes.
+    // Notify stakeholders on state transition
     if (anterior !== estado) {
-      if (estado === 'gestion') avisos.push([[p.promotor_origen_id], fill(cfg.notif_gestion, vars(s, p, actor))]);
+      const esCCDirecto = esCallCenterDirecto(p);
+      const origenReal = esCCDirecto ? null : p.promotor_origen_id;
+      const agenteCC = (esCCDirecto && p.cc && p.cc.agenteId && user(s, p.cc.agenteId)) ? p.cc.agenteId : null;
+      if (estado === 'gestion' && origenReal) avisos.push([[origenReal], fill(cfg.notif_gestion, vars(s, p, actor))]);
       if (estado === 'pescado') {
-        avisos.push([[p.promotor_origen_id], fill(cfg.notif_pescado_promotor, vars(s, p, actor))]);
-        avisos.push([gerentesDe(s, p.sucursal), fill(cfg.notif_pescado_gerente, vars(s, p, actor))]);
+        if (origenReal) avisos.push([[origenReal], fill(cfg.notif_pescado_promotor, vars(s, p, actor))]);
+        avisos.push([gerentesDe(s, p.sucursal), fill(esCCDirecto ? (cfg.notif_cc_directo_gerente || defaultConfig().plantillas.notif_cc_directo_gerente) : cfg.notif_pescado_gerente, vars(s, p, actor))]);
       }
-      if (estado === 'desembolsado') avisos.push([[p.promotor_origen_id, p.gestorId], fill(cfg.notif_desembolsado, vars(s, p, actor))]);
-      if (estado === 'descartado') avisos.push([[p.promotor_origen_id], fill(cfg.notif_descartado, vars(s, p, actor))]);
-      if (estado === 'nuevo') avisos.push([[p.promotor_origen_id], `Tu cliente ${p.nombre} regresó a la cola de Call Center.`]);
+      if (estado === 'desembolsado') {
+        avisos.push([[origenReal, p.asignadoPromotorId, p.gestorId, agenteCC].filter(Boolean), fill(cfg.notif_desembolsado, vars(s, p, actor))]);
+      }
+      if (estado === 'descartado') {
+        avisos.push([[origenReal, p.asignadoPromotorId, p.gestorId, agenteCC].filter(Boolean), fill(cfg.notif_descartado, vars(s, p, actor))]);
+      }
+      if (estado === 'nuevo' && origenReal) avisos.push([[origenReal], `Tu cliente ${p.nombre} regresó a la cola de Call Center.`]);
     }
     const notificaciones = [];
     avisos.forEach(([ids, t]) => notificaciones.push(...notificar(s, ids.filter((x) => x !== actor.id), t, p.id)));
@@ -740,6 +1060,11 @@
     next.telefonoSecundario = next.telefonoSecundario ? soloDigitos(next.telefonoSecundario) : '';
     next.monto = Number(next.monto) || 0;
     next.gestorId = next.gestorId || null;
+    if (esCallCenterDirecto(p)) {
+      next.asignadoPromotorId = next.asignadoPromotorId || null;
+    } else {
+      next.asignadoPromotorId = p.asignadoPromotorId || null;
+    }
     const e = validarDatos(s, next, p.id);
     if (e) return err(e);
     if (!s.config.sucursales.includes(next.sucursal)) return err('Sucursal inválida.');
@@ -747,20 +1072,53 @@
       const g = user(s, next.gestorId);
       if (!g || g.rol !== 'gestor' || (next.gestorId !== p.gestorId && !g.activo)) return err('Gestor inválido o dado de baja.');
     }
+    let promAsig = null;
+    if (esCallCenterDirecto(p) && next.asignadoPromotorId) {
+      promAsig = user(s, next.asignadoPromotorId);
+      if (!promAsig || promAsig.rol !== 'promotor' || (next.asignadoPromotorId !== p.asignadoPromotorId && !promAsig.activo)) {
+        return err('Promotor asignado inválido o dado de baja.');
+      }
+    }
     const cambios = CAMPOS_EDITABLES.filter((k) => String(p[k] ?? '') !== String(next[k] ?? ''))
       .map((k) => `${k}: "${p[k] ?? ''}" → "${next[k] ?? ''}"`);
     if (!cambios.length) return { ok: true, prospecto: p, sinCambios: true };
     const gestorNuevo = next.gestorId && next.gestorId !== p.gestorId;
+    const promNuevo = esCallCenterDirecto(p) && next.asignadoPromotorId && next.asignadoPromotorId !== p.asignadoPromotorId;
     const sucursalNueva = next.sucursal !== p.sucursal;
     CAMPOS_EDITABLES.forEach((k) => { p[k] = next[k]; });
+    if (esCallCenterDirecto(p)) {
+      p.asignadoPromotorNombre = promAsig ? promAsig.nombre : '';
+      if (p.gerencia) {
+        const gCur = p.gestorId ? user(s, p.gestorId) : null;
+        const respParts = [];
+        if (promAsig) respParts.push(`Promotor ${promAsig.nombre}`);
+        if (gCur) respParts.push(`Gestor ${gCur.nombre}`);
+        p.gerencia.asignadoA = respParts.length ? respParts.join(' + ') : `Gerencia directa (${p.gerencia.gerente || actor.nombre})`;
+        p.gerencia.tipoDistribucion = promAsig && gCur ? 'promotor_y_gestor' : promAsig ? 'promotor' : gCur ? 'gestor' : 'gerencia_directa';
+      }
+    }
     const emailsGer = (s.config && s.config.emailsGerentes) || defaultConfig().emailsGerentes;
     if (sucursalNueva && emailsGer[p.sucursal]) p.emailGerente = emailsGer[p.sucursal];
     p.actualizado = now();
     log(p, actor, 'Editado por Administrador', cambios.join('; '));
     const notificaciones = [];
-    if (gestorNuevo) notificaciones.push(...notificar(s, [p.gestorId].filter((x) => x !== actor.id), fill(s.config.plantillas.notif_seguimiento_gestor, vars(s, p, actor)), p.id));
+    const esCC = esCallCenterDirecto(p);
+    if (gestorNuevo) {
+      const tplGes = esCC
+        ? (s.config.plantillas.notif_cc_directo_asignado || defaultConfig().plantillas.notif_cc_directo_asignado)
+        : s.config.plantillas.notif_seguimiento_gestor;
+      notificaciones.push(...notificar(s, [p.gestorId].filter((x) => x !== actor.id), fill(tplGes, vars(s, p, actor)), p.id));
+    }
+    if (promNuevo) {
+      const tplAsig = s.config.plantillas.notif_cc_directo_asignado || defaultConfig().plantillas.notif_cc_directo_asignado;
+      notificaciones.push(...notificar(s, [p.asignadoPromotorId].filter((x) => x !== actor.id), fill(tplAsig, vars(s, p, actor)), p.id));
+    }
     if (sucursalNueva && (p.estado === 'pescado' || p.estado === 'seguimiento')) {
-      notificaciones.push(...notificar(s, gerentesDe(s, p.sucursal).filter((x) => x !== actor.id), fill(s.config.plantillas.notif_pescado_gerente, vars(s, p, actor)), p.id));
+      const tplGer = esCC
+        ? (s.config.plantillas.notif_cc_directo_gerente || defaultConfig().plantillas.notif_cc_directo_gerente)
+        : s.config.plantillas.notif_pescado_gerente;
+      const ag = (p.cc && p.cc.agente) || actor.nombre;
+      notificaciones.push(...notificar(s, gerentesDe(s, p.sucursal).filter((x) => x !== actor.id), fill(tplGer, vars(s, p, actor, { agente: ag })), p.id));
     }
     return { ok: true, prospecto: p, notificaciones };
   }
@@ -800,7 +1158,10 @@
         actualizado: now(),
       });
       if (email !== undefined) u.email = email;
-      s.prospectos.forEach((p) => { if (p.promotor_origen_id === u.id) p.promotor_nombre = u.nombre; });
+      s.prospectos.forEach((p) => {
+        if (p.promotor_origen_id === u.id) p.promotor_nombre = u.nombre;
+        if (p.asignadoPromotorId === u.id) p.asignadoPromotorNombre = u.nombre;
+      });
       auditar(s, actor, 'Usuario modificado', `${antes} → ${u.nombre} (${u.username})/${u.rol}/${u.sucursal}`);
       return { ok: true, usuario: u };
     }
@@ -861,8 +1222,12 @@
     const defTpl = def.plantillas;
     c.plantillas = c.plantillas || {};
     for (const k of Object.keys(defTpl)) {
-      c.plantillas[k] = String(c.plantillas[k] || '').trim();
-      if (!c.plantillas[k]) return err(`La plantilla "${k}" no puede quedar vacía.`);
+      if (!(k in c.plantillas)) {
+        c.plantillas[k] = defTpl[k];
+      } else {
+        c.plantillas[k] = String(c.plantillas[k] || '').trim();
+        if (!c.plantillas[k]) return err(`La plantilla "${k}" no puede quedar vacía.`);
+      }
     }
     s.config = c;
     auditar(s, actor, 'Configuración actualizada', 'Sucursales, estados, motivos, tipos de crédito o plantillas modificados.');
@@ -880,6 +1245,19 @@
     const porPromotor = {};
     const porTipoCredito = {};
     const porPlataforma = {};
+    const ccDirecto = {
+      total: 0,
+      porEstado: Object.fromEntries(ESTADOS.map((e) => [e, 0])),
+      sinDistribuir: 0,
+      distribuidos: 0,
+      desembolsados: 0,
+      descartados: 0,
+      montoDesembolsado: 0,
+      sincronizadosSheet: 0,
+      pendientesSheet: 0,
+      porSucursal: {},
+      porAgente: {},
+    };
     s.prospectos.forEach((p) => {
       porEstado[p.estado]++;
       const tc = p.tipoCredito || 'NV(NUEVO)';
@@ -888,17 +1266,49 @@
       porPlataforma[pl] = (porPlataforma[pl] || 0) + 1;
       const ps = (porSucursal[p.sucursal] = porSucursal[p.sucursal] || { total: 0, desembolsado: 0, monto: 0 });
       ps.total++;
-      const uOrig = user(s, p.promotor_origen_id);
-      const sucOrig = p.sucursal_origen || (uOrig && uOrig.sucursal) || p.sucursal;
-      const pp = (porPromotor[p.promotor_origen_id] = porPromotor[p.promotor_origen_id] || { nombre: p.promotor_nombre, sucursal: sucOrig, total: 0, desembolsado: 0, monto: 0 });
-      pp.total++;
+      const mDes = p.estado === 'desembolsado' ? Number((p.desembolso && p.desembolso.monto) || 0) : 0;
       if (p.estado === 'desembolsado') {
-        const m = Number((p.desembolso && p.desembolso.monto) || 0);
-        ps.desembolsado++; ps.monto += m; pp.desembolsado++; pp.monto += m;
+        ps.desembolsado++; ps.monto += mDes;
+      }
+
+      if (esCallCenterDirecto(p)) {
+        ccDirecto.total++;
+        ccDirecto.porEstado[p.estado]++;
+        if (p.estado === 'pescado') ccDirecto.sinDistribuir++;
+        if (p.gerencia || p.asignadoPromotorId || p.gestorId) ccDirecto.distribuidos++;
+        if (p.estado === 'desembolsado') {
+          ccDirecto.desembolsados++;
+          ccDirecto.montoDesembolsado += mDes;
+        }
+        if (p.estado === 'descartado') ccDirecto.descartados++;
+        if (p.sheetSync && p.sheetSync.status === 'synced') ccDirecto.sincronizadosSheet++;
+        else ccDirecto.pendientesSheet++;
+
+        const cs = (ccDirecto.porSucursal[p.sucursal] = ccDirecto.porSucursal[p.sucursal] || { total: 0, pendientes: 0, seguimiento: 0, desembolsado: 0, descartado: 0, monto: 0 });
+        cs.total++;
+        if (p.estado === 'pescado') cs.pendientes++;
+        if (p.estado === 'seguimiento') cs.seguimiento++;
+        if (p.estado === 'desembolsado') { cs.desembolsado++; cs.monto += mDes; }
+        if (p.estado === 'descartado') cs.descartado++;
+
+        const agNombre = (p.cc && p.cc.agente) || 'Call Center';
+        const ca = (ccDirecto.porAgente[agNombre] = ccDirecto.porAgente[agNombre] || { nombre: agNombre, total: 0, seguimiento: 0, desembolsado: 0, descartado: 0, monto: 0 });
+        ca.total++;
+        if (p.estado === 'seguimiento') ca.seguimiento++;
+        if (p.estado === 'desembolsado') { ca.desembolsado++; ca.monto += mDes; }
+        if (p.estado === 'descartado') ca.descartado++;
+      } else {
+        const uOrig = user(s, p.promotor_origen_id);
+        const sucOrig = p.sucursal_origen || (uOrig && uOrig.sucursal) || p.sucursal;
+        const pp = (porPromotor[p.promotor_origen_id] = porPromotor[p.promotor_origen_id] || { nombre: p.promotor_nombre, sucursal: sucOrig, total: 0, desembolsado: 0, monto: 0 });
+        pp.total++;
+        if (p.estado === 'desembolsado') {
+          pp.desembolsado++; pp.monto += mDes;
+        }
       }
     });
     const total = s.prospectos.length;
-    return { total, porEstado, porSucursal, porPromotor, porTipoCredito, porPlataforma, conversion: total ? Math.round((porEstado.desembolsado / total) * 100) : 0 };
+    return { total, porEstado, porSucursal, porPromotor, porTipoCredito, porPlataforma, callCenterDirecto: ccDirecto, conversion: total ? Math.round((porEstado.desembolsado / total) * 100) : 0 };
   }
 
   // ---------- seed ----------
@@ -1141,6 +1551,7 @@
     s.version = 1;
     s.config = Object.assign({}, base.config, s.config || {});
     s.config.emailsGerentes = Object.assign({}, base.config.emailsGerentes, (s.config && s.config.emailsGerentes) || {});
+    s.config.plantillas = Object.assign({}, base.config.plantillas, (s.config && s.config.plantillas) || {});
     if (!Array.isArray(s.config.tiposCredito) || !s.config.tiposCredito.length) s.config.tiposCredito = base.config.tiposCredito;
     if (!Array.isArray(s.config.plataformas) || !s.config.plataformas.length) s.config.plataformas = base.config.plataformas;
 
@@ -1198,9 +1609,10 @@
   }
 
   return {
-    ROLES, ESTADOS, PASO, CAMPOS_EDITABLES, setClock, defaultConfig, soloDigitos, normCedula, validarTelefono, fill,
-    sinAcentos, normUser, hashPwd, hashPwdScrypt, makePasswordHash, verifyPwd, genUsername, genPassword, autenticar, cambiarPassword,
-    puedeVer, visibles, transiciones, buscarDuplicado, mensajeDuplicado, crearProspecto, capturarProspectoCallCenter,
+    ROLES, ESTADOS, PASO, ORIGEN_CC_ID, ORIGEN_CC_NOMBRE, CAMPOS_EDITABLES, setClock, defaultConfig, soloDigitos, normCedula, validarTelefono, fill,
+    sinAcentos, normUser, esCallCenterDirecto, limpiarTelefonoCC, parseMonto, normalizarSucursal, sucursalParaSheet,
+    hashPwd, hashPwdScrypt, makePasswordHash, verifyPwd, genUsername, genPassword, autenticar, cambiarPassword,
+    puedeVer, visibles, transiciones, buscarDuplicado, mensajeDuplicado, crearProspecto, capturarProspectoCallCenter, capturarCasoCallCenterDirecto,
     categorizarTelefonoCSV, resolverPromotorCSV, clasificarFilasCSV, importarFilasCSV,
     cambiarEstado, agregarNota, adminEditarProspecto, guardarUsuario, toggleUsuario, guardarConfig, marcarLeidas, metricas, gerentesDe, seed, upgradeState,
   };

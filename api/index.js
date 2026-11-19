@@ -4,10 +4,12 @@
 const crypto = require('node:crypto');
 const Core = require('../core.js');
 const DB = require('../db.js');
+const SheetsBridge = require('../sheets-bridge.js');
 
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 let writeLock = Promise.resolve();
+const sheetAppendInFlight = new Map(); // prospectoId -> Promise (prevents duplicate concurrent Sheet appends)
 function withWriteLock(fn) {
   const next = writeLock.then(fn, fn);
   writeLock = next.catch(() => {});
@@ -85,6 +87,90 @@ function authenticateActor(req, state) {
   if (!payload) return null;
   const actor = state.usuarios.find((u) => u.id === payload.sub && u.activo);
   return actor || null;
+}
+
+function getIntegrationKey() {
+  return String(process.env.ALFATRACK_INTEGRATION_KEY || '').trim();
+}
+
+function verifyIntegrationKey(req) {
+  const expected = getIntegrationKey();
+  if (!expected) return false;
+  const hKey = String((req.headers && req.headers['x-alfatrack-key']) || '').trim();
+  const auth = String((req.headers && req.headers.authorization) || '').trim();
+  const bearerKey = auth.startsWith('Bearer ') && !auth.startsWith('Bearer at_tok_') ? auth.slice(7).trim() : '';
+  const candidate = hKey || bearerKey;
+  if (!candidate) return false;
+  const a = Buffer.from(candidate, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function resolveCallCenterActor(state, agenteRaw, authActor) {
+  const q = Core.sinAcentos(agenteRaw || '').toLowerCase().trim();
+  if (q) {
+    const exact = state.usuarios.find((u) =>
+      u.activo && u.rol === 'callcenter' && (
+        Core.sinAcentos(u.nombre).toLowerCase() === q ||
+        (u.username && u.username.toLowerCase() === q)
+      )
+    );
+    if (exact) return exact;
+    const partial = state.usuarios.find((u) =>
+      u.activo && u.rol === 'callcenter' && Core.sinAcentos(u.nombre).toLowerCase().includes(q)
+    );
+    if (partial) return partial;
+  }
+  if (authActor && authActor.activo && ['callcenter', 'admin'].includes(authActor.rol)) return authActor;
+  return state.usuarios.find((u) => u.activo && u.rol === 'callcenter') || state.usuarios.find((u) => u.activo && u.rol === 'admin') || null;
+}
+
+async function persistSheetSyncOutcome(prospectoId, op, syncRes, actor) {
+  const nowIso = new Date().toISOString();
+  return runAtomicMutation((state) => {
+    const p = state.prospectos.find((x) => x.id === prospectoId);
+    if (!p) return { ok: false, error: 'Prospecto no encontrado.' };
+    const prev = p.sheetSync || { status: 'pending', sheetRow: null, source: p.origenApp || 'alfatrack', syncedAt: null, emailAlertExpected: true, lastError: '' };
+    if (op === 'append') {
+      if (syncRes && syncRes.ok) {
+        p.sheetSync = Object.assign({}, prev, {
+          status: 'synced',
+          sheetRow: Number(syncRes.sheetRow) || prev.sheetRow,
+          syncedAt: nowIso,
+          emailAlertExpected: true,
+          lastError: '',
+        });
+        p.historial.push({
+          ts: nowIso,
+          userId: actor ? actor.id : 'system',
+          usuario: actor ? actor.nombre : 'Sistema',
+          rol: actor ? actor.rol : 'callcenter',
+          accion: 'Sincronizado con Google Sheets',
+          detalle: `Fila #${p.sheetSync.sheetRow} registrada en hoja "Clientes" (alerta de correo activada para ${p.emailGerente}).`,
+        });
+      } else {
+        p.sheetSync = Object.assign({}, prev, {
+          status: syncRes && syncRes.skipped ? 'pending' : 'error',
+          lastError: (syncRes && syncRes.error) || 'No se pudo sincronizar con Google Sheets.',
+        });
+      }
+    } else if (op === 'update_followup') {
+      if (syncRes && syncRes.ok) {
+        p.sheetSync = Object.assign({}, prev, {
+          status: 'synced',
+          lastFollowUpSyncAt: nowIso,
+          lastFollowUpError: '',
+        });
+      } else if (!syncRes || !syncRes.skipped) {
+        p.sheetSync = Object.assign({}, prev, {
+          lastFollowUpError: (syncRes && syncRes.error) || 'No se pudo actualizar seguimiento en Google Sheets.',
+        });
+      } else {
+        return { ok: true, skipSave: true, prospecto: p };
+      }
+    }
+    return { ok: true, prospecto: p, delta: { prospectos: [p] } };
+  });
 }
 
 function sanitizeUser(u, isAdmin) {
@@ -344,6 +430,27 @@ module.exports = async function handler(req, res) {
             result = Core.capturarProspectoCallCenter(state, actor, payload || {});
             if (result.ok) delta = { prospectos: [result.prospecto] };
             break;
+          case 'capturarCasoCallCenterDirecto':
+            result = Core.capturarCasoCallCenterDirecto(state, actor, Object.assign({}, payload || {}, { origenApp: 'alfatrack' }));
+            if (result.ok) {
+              if (result.deduplicated) skipSave = true;
+              else delta = { prospectos: [result.prospecto] };
+            }
+            break;
+          case 'reintentarSyncSheet': {
+            const pTarget = state.prospectos.find((x) => x.id === (payload && payload.id));
+            if (!pTarget) {
+              result = { ok: false, error: 'Prospecto no encontrado.' };
+            } else if (!Core.esCallCenterDirecto(pTarget)) {
+              result = { ok: false, error: 'Solo los casos directos de Call Center se sincronizan con Google Sheets.' };
+            } else if (!['callcenter', 'gerente', 'admin'].includes(actor.rol) || !Core.puedeVer(actor, pTarget)) {
+              result = { ok: false, error: 'No tiene permiso para sincronizar este caso.' };
+            } else {
+              result = { ok: true, prospecto: pTarget };
+              skipSave = true;
+            }
+            break;
+          }
           case 'importarFilasCSV':
             result = Core.importarFilasCSV(state, actor, (payload && payload.filas) || [], (payload && payload.opts) || {});
             if (result.ok) {
@@ -371,7 +478,7 @@ module.exports = async function handler(req, res) {
             if (result.ok) {
               delta = {
                 usuarios: [result.usuario],
-                prospectos: state.prospectos.filter((p) => p.promotor_origen_id === result.usuario.id),
+                prospectos: state.prospectos.filter((p) => p.promotor_origen_id === result.usuario.id || p.asignadoPromotorId === result.usuario.id),
               };
             }
             break;
@@ -420,12 +527,168 @@ module.exports = async function handler(req, res) {
       if (!out.ok) {
         return sendJson(res, out.status || 400, { ok: false, error: out.error, result: out.result });
       }
+
+      // Post-commit Google Sheets synchronization for Call Center Directo cases (never blocks or rolls back DB persistence)
+      let finalState = out.state;
+      let finalRev = out.rev;
+      let finalTursoSynced = out.tursoSynced;
+      let finalResult = out.result;
+      const pAffected = finalResult && finalResult.prospecto;
+
+      if (pAffected && Core.esCallCenterDirecto(pAffected)) {
+        const isCreateDirecto = (action === 'capturarCasoCallCenterDirecto' || (action === 'capturarProspectoCallCenter' && payload && payload.modo === 'directo')) && !finalResult.deduplicated;
+        const isRetry = action === 'reintentarSyncSheet';
+        const isFollowUpChange = ['cambiarEstado', 'agregarNota', 'adminEditarProspecto'].includes(action) && !finalResult.sinCambios;
+
+        if (isCreateDirecto || (isRetry && !(pAffected.sheetSync && Number(pAffected.sheetSync.sheetRow) > 1))) {
+          let syncTask = sheetAppendInFlight.get(pAffected.id);
+          if (!syncTask) {
+            syncTask = (async () => {
+              // Re-check latest persisted row before appending to prevent duplicate rows on concurrent retries
+              const fresh = await DB.getState();
+              const cur = fresh && fresh.state && fresh.state.prospectos.find((x) => x.id === pAffected.id);
+              if (cur && cur.sheetSync && Number(cur.sheetSync.sheetRow) > 1) {
+                return { syncRes: { ok: true, sheetRow: cur.sheetSync.sheetRow, deduplicated: true }, updated: { ok: true, state: fresh.state, rev: fresh.rev, tursoSynced: finalTursoSynced, prospecto: cur } };
+              }
+              const target = cur || pAffected;
+              const syncRes = await SheetsBridge.appendCallCenterRow(target);
+              let updated = await persistSheetSyncOutcome(target.id, 'append', syncRes, out.actor);
+              // If the case already has follow-up progress (state != 'pescado', gerencia, or notes), immediately sync K:O too
+              if (syncRes && syncRes.ok && updated && updated.ok && updated.prospecto) {
+                const pNow = updated.prospecto;
+                const hasFollowUp = pNow.estado !== 'pescado' || Boolean(pNow.gerencia) || (pNow.historial || []).some((h) => h.accion === 'Nota agregada');
+                if (hasFollowUp) {
+                  const fuRes = await SheetsBridge.updateCallCenterFollowUp(pNow, updated.state);
+                  const fuUpdated = await persistSheetSyncOutcome(pNow.id, 'update_followup', fuRes, out.actor);
+                  if (fuUpdated && fuUpdated.ok) updated = fuUpdated;
+                }
+              }
+              return { syncRes, updated };
+            })().finally(() => { sheetAppendInFlight.delete(pAffected.id); });
+            sheetAppendInFlight.set(pAffected.id, syncTask);
+          }
+          const { syncRes, updated } = await syncTask;
+          if (updated && updated.ok) {
+            finalState = updated.state;
+            finalRev = updated.rev || finalRev;
+            finalTursoSynced = updated.tursoSynced;
+            finalResult = Object.assign({}, finalResult, { prospecto: updated.prospecto, sheetSync: syncRes });
+          }
+        } else if ((isFollowUpChange || isRetry) && pAffected.sheetSync && Number(pAffected.sheetSync.sheetRow) > 1) {
+          const syncRes = await SheetsBridge.updateCallCenterFollowUp(pAffected, finalState);
+          const updated = await persistSheetSyncOutcome(pAffected.id, 'update_followup', syncRes, out.actor);
+          if (updated && updated.ok) {
+            finalState = updated.state;
+            finalRev = updated.rev || finalRev;
+            finalTursoSynced = updated.tursoSynced;
+            finalResult = Object.assign({}, finalResult, { prospecto: updated.prospecto, sheetSync: syncRes });
+          }
+        }
+      }
+
       return sendJson(res, 200, {
         ok: true,
-        result: out.result,
-        state: scopeStateForUser(out.state, out.actor),
-        tursoSynced: out.tursoSynced,
+        result: finalResult,
+        state: scopeStateForUser(finalState, out.actor),
+        tursoSynced: finalTursoSynced,
+        rev: finalRev,
+      });
+    }
+
+    // 5b. Integration: Ingest new Call Center credit lead from Python Call Center app (idempotent, no Google Sheet echo)
+    if (pathname === '/api/integrations/callcenter/ingest' && method === 'POST') {
+      const body = await readBody(req);
+      const hasValidKey = verifyIntegrationKey(req);
+      const out = await runAtomicMutation((state) => {
+        const authActor = authenticateActor(req, state);
+        if (!hasValidKey) {
+          if (!authActor) {
+            return { ok: false, status: 401, error: 'Autenticación requerida (X-AlfaTrack-Key o sesión de Call Center/Admin).' };
+          }
+          if (!['callcenter', 'admin'].includes(authActor.rol)) {
+            return { ok: false, status: 403, error: 'Solo Call Center o Administrador puede registrar casos por integración.' };
+          }
+        }
+        const actor = resolveCallCenterActor(state, body.agente || body.agenteNombre, authActor);
+        if (!actor) return { ok: false, status: 500, error: 'No se encontró un actor válido de Call Center.' };
+
+        const notifBefore = state.notificaciones.length;
+        const auditBefore = state.auditoria.length;
+        const result = Core.capturarCasoCallCenterDirecto(state, actor, {
+          externalId: body.externalId || body.external_id || '',
+          sheetRow: body.sheetRow || body.fila_sheet || null,
+          agenteNombre: body.agente || body.agenteNombre || actor.nombre,
+          nombre: body.nombre || body.cliente || '',
+          tipoCredito: body.tipoCredito || body.tipo_credito || 'NV(NUEVO)',
+          telefono: body.telefono || '',
+          telefonoSecundario: body.telefonoSecundario || body.telefono_secundario || '',
+          cedula: body.cedula || '',
+          direccion: body.direccion || body.direccionNegocio || '',
+          negocio: body.negocio || body.tipoNegocio || '',
+          emailGerente: body.emailGerente || body.email_gerente || '',
+          sucursal: body.sucursal || '',
+          monto: body.monto !== undefined ? body.monto : (body.monto_solicitado !== undefined ? body.monto_solicitado : ''),
+          plataforma: body.plataforma || 'Whatsapp',
+          campana: body.campana || body.detalle || '',
+          notas: body.notas || '',
+          origenApp: 'python_callcenter',
+        });
+
+        if (!result.ok) {
+          return { ok: false, status: result.duplicate ? 409 : 400, duplicate: Boolean(result.duplicate), error: result.error };
+        }
+        if (result.deduplicated) {
+          return { ok: true, deduplicated: true, skipSave: true, prospecto: result.prospecto, notificacionesCount: 0 };
+        }
+
+        const delta = { prospectos: [result.prospecto] };
+        const newNotifs = state.notificaciones.slice(notifBefore);
+        if (newNotifs.length) delta.notificaciones = newNotifs;
+        const newAudit = state.auditoria.slice(auditBefore);
+        if (newAudit.length) delta.auditoria = newAudit;
+        return {
+          ok: true,
+          deduplicated: false,
+          prospecto: result.prospecto,
+          notificacionesCount: (result.notificaciones || []).length,
+          delta,
+        };
+      });
+
+      if (!out.ok) {
+        return sendJson(res, out.status || 400, { ok: false, duplicate: Boolean(out.duplicate), error: out.error });
+      }
+      return sendJson(res, out.deduplicated ? 200 : 201, {
+        ok: true,
+        deduplicated: Boolean(out.deduplicated),
+        prospecto: out.prospecto,
+        notificacionesCount: out.notificacionesCount || 0,
         rev: out.rev,
+      });
+    }
+
+    // 5c. Integration diagnostic status (authenticated Admin or Call Center only)
+    if (pathname === '/api/integrations/callcenter/status' && method === 'GET') {
+      const { state } = await DB.getState();
+      const actor = authenticateActor(req, state);
+      if (!actor) return sendJson(res, 401, { ok: false, error: 'Sesión requerida.' });
+      if (!['admin', 'callcenter'].includes(actor.rol)) {
+        return sendJson(res, 403, { ok: false, error: 'Acceso restringido a Call Center y Administración.' });
+      }
+      const directos = state.prospectos.filter((p) => Core.esCallCenterDirecto(p));
+      return sendJson(res, 200, {
+        ok: true,
+        endpoint: '/api/integrations/callcenter/ingest',
+        integrationKeyConfigured: Boolean(getIntegrationKey()),
+        sheets: SheetsBridge.getStatus(),
+        stats: {
+          totalDirectos: directos.length,
+          syncedToSheet: directos.filter((p) => p.sheetSync && p.sheetSync.status === 'synced').length,
+          pendingSheetSync: directos.filter((p) => !p.sheetSync || p.sheetSync.status === 'pending').length,
+          errorSheetSync: directos.filter((p) => p.sheetSync && p.sheetSync.status === 'error').length,
+          fromPythonApp: directos.filter((p) => p.origenApp === 'python_callcenter').length,
+          fromWebApp: directos.filter((p) => p.origenApp !== 'python_callcenter').length,
+        },
       });
     }
 

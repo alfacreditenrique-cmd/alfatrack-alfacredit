@@ -45,10 +45,12 @@ for (const file of staticFiles) {
 // 2. Copy serverless function files into api/index.func
 fs.copyFileSync(path.join(ROOT, 'core.js'), path.join(FUNC_DIR, 'core.js'));
 fs.copyFileSync(path.join(ROOT, 'db.js'), path.join(FUNC_DIR, 'db.js'));
+fs.copyFileSync(path.join(ROOT, 'sheets-bridge.js'), path.join(FUNC_DIR, 'sheets-bridge.js'));
 
 const apiCode = fs.readFileSync(path.join(ROOT, 'api', 'index.js'), 'utf8')
   .replace("require('../core.js')", "require('./core.js')")
-  .replace("require('../db.js')", "require('./db.js')");
+  .replace("require('../db.js')", "require('./db.js')")
+  .replace("require('../sheets-bridge.js')", "require('./sheets-bridge.js')");
 
 fs.writeFileSync(path.join(FUNC_DIR, 'index.js'), apiCode, 'utf8');
 fs.writeFileSync(path.join(FUNC_DIR, 'package.json'), JSON.stringify({ type: 'commonjs' }, null, 2), 'utf8');

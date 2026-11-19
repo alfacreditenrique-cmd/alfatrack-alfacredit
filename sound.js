@@ -168,10 +168,10 @@
   function playForNotification(rol, texto) {
     const t = String(texto || '').toLowerCase();
     if (t.includes('desembolsado')) return play('desembolsado');
-    if (t.includes('pescado') || t.includes('calificó')) {
+    if (t.includes('asignó') || t.includes('apoyo')) return play('assigned_support');
+    if (t.includes('pescado') || t.includes('calificó') || t.includes('caso directo')) {
       return play(rol === 'gerente' ? 'pescado_branch' : 'pescado');
     }
-    if (t.includes('asignó') || t.includes('apoyo')) return play('assigned_support');
     if (rol === 'callcenter') return play('new_queue');
     return play('notify');
   }
@@ -179,7 +179,7 @@
   function playForAction(rol, action, ok) {
     if (!ok) return play(rol === 'admin' ? 'admin_warn' : 'error');
     if (action === 'crearProspecto') return play('prospect_created');
-    if (action === 'capturarProspectoCallCenter' || action === 'importarFilasCSV') {
+    if (action === 'capturarProspectoCallCenter' || action === 'capturarCasoCallCenterDirecto' || action === 'importarFilasCSV') {
       return play(rol === 'admin' ? 'admin_ok' : 'call_saved');
     }
     if (action === 'cambiarEstado') {

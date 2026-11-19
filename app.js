@@ -78,8 +78,11 @@
     userSearch: '',
     proFilter: '',
     proSearch: '',
+    ccModo: 'directo',
+    gerOrigen: '',
+    ccSyncStatus: null,
     tab: isDbManagerUrl() ? { adm: 'bd' } : {},
-    f: { sucursal: '', estado: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' },
+    f: { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' },
     csv: { filas: [], clasif: null, tab: 'validos', rawText: '' },
     db: {
       stats: null,
@@ -147,7 +150,7 @@
       if (notaInp && notaInp.value.trim()) return true;
     }
     if ($('form[data-form="config"]')) return true;
-    const createForm = $('form[data-form="nuevo"], form[data-form="captura-cc"]');
+    const createForm = $('form[data-form="nuevo"], form[data-form="captura-cc"], form[data-form="captura-cc-directo"]');
     if (createForm) {
       for (const name of ['nombre', 'telefono', 'telefonoSecundario', 'cedula', 'monto', 'direccion', 'campana', 'notas']) {
         const fld = createForm.elements[name];
@@ -191,8 +194,11 @@
     ui.userSearch = '';
     ui.proFilter = '';
     ui.proSearch = '';
+    ui.ccModo = 'directo';
+    ui.gerOrigen = '';
+    ui.ccSyncStatus = null;
     ui.tab = isDbManagerUrl() ? { adm: 'bd' } : {};
-    ui.f = { sucursal: '', estado: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' };
+    ui.f = { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' };
     ui.csv = { filas: [], clasif: null, tab: 'validos', rawText: '' };
     ui.db.stats = null;
     ui.db.tableData = null;
@@ -392,6 +398,17 @@
     }
   }
 
+  async function fetchCcSyncStatus() {
+    if (!isHttp() || !ui.autenticado) return;
+    try {
+      const { res, data } = await apiFetch('/api/integrations/callcenter/status', { method: 'GET' });
+      if (res.ok && data && data.ok) {
+        ui.ccSyncStatus = data;
+        render();
+      }
+    } catch {}
+  }
+
   async function fetchDbStats() {
     if (!isHttp() || !ui.autenticado) return;
     try {
@@ -575,8 +592,39 @@
     return `<span class="sla ${cls}" title="Tiempo en etapa actual">${dot} ${lbl}</span>`;
   }
 
+  function sheetSyncBadge(p) {
+    if (!C.esCallCenterDirecto(p)) return '';
+    const ss = p.sheetSync || {};
+    if (ss.status === 'synced' && ss.sheetRow) {
+      const errNote = ss.lastFollowUpError ? ' · ⚠️ seguimiento pendiente' : '';
+      return `<span class="badge b-green" title="Sincronizado con Google Sheets (fila #${ss.sheetRow}) · Alerta correo a ${h(p.emailGerente || '')}${h(errNote)}">📊 Sheet #${ss.sheetRow} ✉️</span>`;
+    }
+    if (ss.status === 'error') {
+      return `<span class="badge b-red" title="${h(ss.lastError || 'Error sincronizando con Google Sheets')}">⚠️ Sheet error</span>`;
+    }
+    return `<span class="badge b-amber" title="${h(ss.lastError || 'Pendiente de sincronización con Google Sheets')}">⏳ Sheet pend.</span>`;
+  }
+
+  function responsableTexto(p) {
+    const parts = [];
+    const prom = p.asignadoPromotorId && user(p.asignadoPromotorId);
+    const gest = p.gestorId && user(p.gestorId);
+    if (prom || p.asignadoPromotorNombre) parts.push(`Promotor: ${prom ? prom.nombre : p.asignadoPromotorNombre}`);
+    if (gest) parts.push(`Gestor: ${gest.nombre}`);
+    if (!parts.length && p.gerencia && p.gerencia.asignadoA) return p.gerencia.asignadoA;
+    return parts.join(' + ');
+  }
+
   function originBadge(p, withBranch) {
     const branchTxt = withBranch ? ` · ${h(p.sucursal)}` : '';
+    if (C.esCallCenterDirecto(p)) {
+      const ag = (p.cc && p.cc.agente) || 'Call Center';
+      const via = p.origenApp === 'python_callcenter' ? '🐍' : '🌐';
+      return `<span class="b-origin b-origin-cc" title="Caso Directo Call Center (enviado a Gerencia para distribución)">
+        <span class="origin-av">CC</span>
+        <span class="origin-txt">📞 ${h(ag)} ${via}${branchTxt}</span>
+      </span>`;
+    }
     return `<span class="b-origin" title="Candado de Origen — Promotor captador (no modificable)">
       <span class="origin-av">${h(iniciales(p.promotor_nombre))}</span>
       <span class="origin-txt">🔒 ${h(p.promotor_nombre)}${branchTxt}</span>
@@ -598,13 +646,20 @@
     if (!u) return '';
     const t = C.transiciones(u, p);
     const b = [];
-    const wa = 'https://wa.me/505' + p.telefono + '?text=' + encodeURIComponent(C.fill(S.config.plantillas.whatsapp, { cliente: p.nombre, agente: u.nombre, promotor: p.promotor_nombre, sucursal: p.sucursal }));
+    const esCC = C.esCallCenterDirecto(p);
+    const waTpl = esCC
+      ? 'Hola {cliente}, le saluda {agente} de AlfaCredit (sucursal {sucursal}) en seguimiento a su solicitud de crédito atendida por nuestro Call Center. ¿Tiene un momento para conversar?'
+      : S.config.plantillas.whatsapp;
+    const wa = 'https://wa.me/505' + p.telefono + '?text=' + encodeURIComponent(C.fill(waTpl, { cliente: p.nombre, agente: u.nombre, promotor: p.promotor_nombre, sucursal: p.sucursal }));
     b.push(`<a class="btn sm ghost" href="tel:+505${h(p.telefono)}">📞 Llamar</a>`, `<a class="btn sm wa" target="_blank" rel="noopener" href="${h(wa)}">💬 WhatsApp</a>`);
     if (u.rol === 'callcenter' && t.length) b.push(`<button class="btn sm primary" data-action="estado" data-id="${p.id}">Gestionar llamada</button>`);
-    if (u.rol === 'gerente' && p.estado === 'pescado') b.push(`<button class="btn sm primary" data-action="estado" data-id="${p.id}" data-pre="seguimiento">Asignar Seguimiento</button>`);
+    if (u.rol === 'gerente' && p.estado === 'pescado') b.push(`<button class="btn sm primary" data-action="estado" data-id="${p.id}" data-pre="seguimiento">${esCC ? 'Distribuir caso' : 'Asignar Seguimiento'}</button>`);
     if ((u.rol === 'gerente' || u.rol === 'gestor') && p.estado === 'seguimiento') b.push(`<button class="btn sm primary" data-action="estado" data-id="${p.id}" data-pre="desembolsado">Cerrar caso</button>`);
-    if (u.rol === 'gerente' && p.estado === 'seguimiento') b.push(`<button class="btn sm ghost" data-action="estado" data-id="${p.id}" data-pre="seguimiento">Reasignar apoyo</button>`);
+    if (u.rol === 'gerente' && p.estado === 'seguimiento') b.push(`<button class="btn sm ghost" data-action="estado" data-id="${p.id}" data-pre="seguimiento">${esCC ? 'Redistribuir' : 'Reasignar apoyo'}</button>`);
     if (u.rol === 'admin') b.push(`<button class="btn sm ghost" data-action="editar" data-id="${p.id}">✏️ Editar</button>`, `<button class="btn sm primary" data-action="estado" data-id="${p.id}">Cambiar estado</button>`);
+    if (opts.inDrawer && esCC && ['callcenter', 'gerente', 'admin'].includes(u.rol) && (!p.sheetSync || p.sheetSync.status !== 'synced' || p.sheetSync.lastFollowUpError)) {
+      b.push(`<button class="btn sm ghost" data-action="retry-sheet" data-id="${p.id}">🔄 Sync Google Sheets</button>`);
+    }
     if (!opts.inDrawer) b.push(`<button class="btn sm ghost" data-action="ver" data-id="${p.id}">🕒 Historial</button>`);
     return `<div class="actions">${b.join('')}</div>`;
   }
@@ -612,6 +667,13 @@
   function card(p, opts) {
     opts = opts || {};
     const g = p.gestorId && user(p.gestorId);
+    const esCC = C.esCallCenterDirecto(p);
+    const resp = esCC ? responsableTexto(p) : '';
+    const ag = (p.cc && p.cc.agente) || 'Call Center';
+    const viaLbl = p.origenApp === 'python_callcenter' ? 'App Python' : 'AlfaTrack Web';
+    const originHeader = esCC
+      ? `<div class="seal seal-cc">📞 CASO DIRECTO CALL CENTER · Agente: <b>${h(ag)}</b> <small>(${viaLbl})</small> ${sheetSyncBadge(p)}${resp ? `<div style="margin-top:3px">👤 <b>Distribuido a:</b> ${h(resp)}</div>` : '<div style="margin-top:3px">🏢 <em>Enviado a Gerencia para distribución</em></div>'}</div>`
+      : (opts.sello ? `<div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> <em>(No modificable)</em></div>` : originBadge(p, true));
     return `<article class="card s-${SEM[p.estado]}">
       <header>
         <div>
@@ -620,7 +682,7 @@
         </div>
         <div class="badges-col">${badgeEstado(p.estado)} <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">${badgeSLA(p)} ${badgeTipoCredito(p.tipoCredito)}</div></div>
       </header>
-      ${opts.sello ? `<div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> <em>(No modificable)</em></div>` : originBadge(p, true)}
+      ${originHeader}
       <dl class="facts">
         <div><dt>Monto</dt><dd class="money">${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</dd></div>
         <div><dt>Negocio</dt><dd>${h((p.cc && p.cc.rubro) || p.negocio || '—')}</dd></div>
@@ -630,7 +692,7 @@
       </dl>
       ${progreso(p)}
       ${p.cc && (p.cc.comentarios || p.cc.ultimaGestion) ? `<p class="note cc"><b>📞 Call Center (${h(p.cc.agente)}):</b> ${h(p.cc.comentarios || p.cc.ultimaGestion)}</p>` : ''}
-      ${p.gerencia ? `<p class="note ger"><b>🏢 Gerente (${h(p.gerencia.gerente)}):</b> ${h(p.gerencia.instrucciones)}${g ? `<br><b>Gestor de apoyo:</b> ${h(g.nombre)}` : ''}</p>` : ''}
+      ${p.gerencia ? `<p class="note ger"><b>🏢 Gerente (${h(p.gerencia.gerente)}):</b> ${h(p.gerencia.instrucciones)}${esCC && resp ? `<br><b>Responsable asignado:</b> ${h(resp)}` : (g ? `<br><b>Gestor de apoyo:</b> ${h(g.nombre)}` : '')}</p>` : ''}
       ${accionesCard(p)}
     </article>`;
   }
@@ -699,7 +761,7 @@
         <td><b>${h(p.nombre)}</b><br><small>${h((p.cc && p.cc.rubro) || p.negocio || '—')} · ${h(p.plataforma || 'Campo')}</small></td>
         <td>${badgeTipoCredito(p.tipoCredito)}</td>
         <td class="tel-num">${telFmt(p.telefono)}${p.telefonoSecundario ? `<br><small>${telFmt(p.telefonoSecundario)}</small>` : ''}</td>
-        <td>${originBadge(p, false)}</td>
+        <td>${originBadge(p, false)}${C.esCallCenterDirecto(p) ? `<div style="margin-top:3px">${sheetSyncBadge(p)}${responsableTexto(p) ? `<br><small>👤 ${h(responsableTexto(p))}</small>` : ''}</div>` : ''}</td>
         <td>${h(p.sucursal)}</td>
         <td class="money"><b>${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</b></td>
         <td>${badgeEstado(p.estado)}</td>
@@ -720,20 +782,22 @@
     return arr.filter((p) =>
       (!f.sucursal || p.sucursal === f.sucursal) &&
       (!f.estado || p.estado === f.estado) &&
+      (!f.origen || (f.origen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p))) &&
       (!f.tipoCredito || (p.tipoCredito || 'NV(NUEVO)') === f.tipoCredito) &&
       (!f.plataforma || (p.plataforma || 'Cambaceo / Campo') === f.plataforma) &&
       (!f.desde || new Date(p.creado) >= new Date(f.desde + 'T00:00:00')) &&
       (!f.hasta || new Date(p.creado) <= new Date(f.hasta + 'T23:59:59.999')) &&
-      (!q || [p.nombre, p.telefono, p.telefonoSecundario, p.cedula, p.promotor_nombre, p.negocio, p.direccion].join(' ').toLowerCase().includes(q)));
+      (!q || [p.nombre, p.telefono, p.telefonoSecundario, p.cedula, p.promotor_nombre, p.asignadoPromotorNombre, (p.cc && p.cc.agente), p.negocio, p.direccion].join(' ').toLowerCase().includes(q)));
   }
 
   function filtrosHTML() {
     const f = ui.f;
     const tcs = (S.config && S.config.tiposCredito) || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
     return `<form class="filters" data-form="filtros" onsubmit="return false">
-      <input type="search" name="q" placeholder="Buscar nombre, teléfono, cédula, negocio o promotor" value="${h(f.q)}" aria-label="Buscar">
+      <input type="search" name="q" placeholder="Buscar nombre, teléfono, cédula, negocio, agente o promotor" value="${h(f.q)}" aria-label="Buscar">
       <select name="sucursal" aria-label="Sucursal"><option value="">Todas las sucursales</option>${(S.config.sucursales || []).map((s) => `<option ${s === f.sucursal ? 'selected' : ''}>${h(s)}</option>`).join('')}</select>
       <select name="estado" aria-label="Estado"><option value="">Todos los estados</option>${C.ESTADOS.map((e) => `<option value="${e}" ${e === f.estado ? 'selected' : ''}>${h(est(e))}</option>`).join('')}</select>
+      <select name="origen" aria-label="Origen"><option value="">Todos los orígenes</option><option value="callcenter_directo" ${f.origen === 'callcenter_directo' ? 'selected' : ''}>📞 Call Center Directo</option><option value="promotor" ${f.origen === 'promotor' ? 'selected' : ''}>🔒 Promotor (Candado)</option></select>
       <select name="tipoCredito" aria-label="Tipo de Crédito"><option value="">Todo Tipo Crédito</option>${tcs.map((t) => `<option value="${h(t)}" ${t === f.tipoCredito ? 'selected' : ''}>${h(t)}</option>`).join('')}</select>
       <label>Desde <input type="date" name="desde" value="${h(f.desde)}"></label>
       <label>Hasta <input type="date" name="hasta" value="${h(f.hasta)}"></label>
@@ -941,56 +1005,110 @@
     const gest = todos.filter((p) => p.estado === 'gestion').length;
     const pesc = todos.filter((p) => p.estado === 'pescado').length;
     const desem = todos.filter((p) => p.estado === 'desembolsado').length;
+    const directos = todos.filter((p) => C.esCallCenterDirecto(p)).length;
     const tab = tabActual('cc', 'bandeja');
     const tcs = S.config.tiposCredito || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
     const plats = S.config.plataformas || ['Whatsapp', 'Facebook', 'Instagram', 'Tik tok', 'Recomendación', 'Cambaceo / Campo', 'Otro'];
     const promotoresActivos = S.usuarios.filter((x) => x.rol === 'promotor' && x.activo).sort((a, b) => a.sucursal.localeCompare(b.sucursal) || a.nombre.localeCompare(b.nombre));
+    const sucursalesDestino = (S.config.sucursales || []).filter((s) => s !== 'Casa Matriz');
+    const sucDefault = sucursalesDestino[0] || (S.config.sucursales && S.config.sucursales[0]) || 'Managua';
+    const emailDefault = (S.config.emailsGerentes && S.config.emailsGerentes[sucDefault]) || 'alfacreditenrique@gmail.com';
 
     let body = '';
     if (tab === 'captura') {
-      body = `<form class="panel form" data-form="captura-cc" novalidate>
-        <h2>📝 Captura de Prospectos — Call Center AlfaCredit</h2>
-        <p class="hint">Registra un prospecto atendido por Call Center (<b>${h(u.nombre)}</b>) asignando el <b>Promotor de Origen</b> y la <b>Sucursal Destino</b>.</p>
-        <div class="cols two">
-          <label>Promotor de Origen (Candado de Origen 🔒) *
-            <select name="promotorOrigenId" required>
-              ${promotoresActivos.map((p) => `<option value="${p.id}">${h(p.nombre)} — ${h(p.sucursal)}</option>`).join('')}
-            </select>
-          </label>
-          <label>Tipo de Crédito *
-            <select name="tipoCredito">${tcs.map((t) => `<option value="${h(t)}">${h(t)}</option>`).join('')}</select>
-          </label>
-        </div>
-        <div class="cols two">
-          <label>Nombre Completo del Cliente *<input name="nombre" required minlength="3" placeholder="Ej: Juan Carlos Pérez Gómez"></label>
-          <label><span class="field-head"><span>Teléfono de Contacto *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="16" placeholder="8888-9999" data-dup data-fmt="tel"></label>
-        </div>
-        <div class="cols two">
-          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="16" placeholder="7777-1111" data-fmt="tel"></label>
-          <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
-        </div>
-        <div id="dup-alert" class="alert" hidden></div>
-        <div class="cols two">
-          <label>Monto Solicitado (C$) *<input name="monto" type="number" min="1" step="100" required placeholder="15000"></label>
-          <label>Tipo de Negocio *<select name="negocio">${S.config.negocios.map((n) => `<option>${h(n)}</option>`).join('')}</select></label>
-        </div>
-        <div class="cols two">
-          <label>¿Por qué plataforma nos contactó?<select name="plataforma">${plats.map((p) => `<option>${h(p)}</option>`).join('')}</select></label>
-          <label>Detalle de Contacto / Campaña<input name="campana" placeholder="Ej: Campaña Facebook / WhatsApp"></label>
-        </div>
-        <label>Dirección del Negocio / Domicilio *<input name="direccion" required placeholder="Ej: Del parque 2c al sur, 1c al este"></label>
-        <label>Notas iniciales de Call Center<textarea name="notas" rows="2"></textarea></label>
-        <button class="btn primary block" type="submit">💾 Registrar Cliente en Cola</button>
-      </form>`;
+      const modo = ui.ccModo || 'directo';
+      const modeSwitch = `<div class="quick" style="margin-bottom:12px">
+        <button type="button" class="chip ${modo === 'directo' ? 'on' : ''}" data-action="cc-modo" data-val="directo">📞 Directo a Gerencia (Sin Promotor · Google Sheets + Correo)</button>
+        <button type="button" class="chip ${modo === 'promotor' ? 'on' : ''}" data-action="cc-modo" data-val="promotor">🔒 Con Promotor de Origen (Candado)</button>
+      </div>`;
+      if (modo === 'directo') {
+        body = `<form class="panel form" data-form="captura-cc-directo" novalidate>
+          <h2>📞 Nuevo Caso Directo Call Center → Gerencia</h2>
+          ${modeSwitch}
+          <p class="hint">Registra un cliente interesado captado por Call Center (<b>${h(u.nombre)}</b>) <b>sin promotor de calle</b>. El caso llega directo al <b>Gerente de Sucursal</b> en AlfaTrack para su distribución y se sincroniza automáticamente con <b>Google Sheets ("Clientes")</b> para disparar la alerta por correo electrónico.</p>
+          <div class="cols two">
+            <label>Sucursal Destino (Gerencia) *
+              <select name="sucursal" data-change="cc-sucursal" required>
+                ${(S.config.sucursales || []).map((s) => `<option value="${h(s)}" ${s === sucDefault ? 'selected' : ''}>${h(s)}</option>`).join('')}
+              </select>
+            </label>
+            <label>Email Gerente (Notificación Google Sheets)
+              <input name="emailGerente" id="cc-email-gerente" value="${h(emailDefault)}" readonly>
+            </label>
+          </div>
+          <div class="cols two">
+            <label>Nombre Completo del Cliente *<input name="nombre" required minlength="3" placeholder="Ej: Juan Carlos Pérez Gómez"></label>
+            <label><span class="field-head"><span>Teléfono de Contacto *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="16" placeholder="8888-9999" data-dup data-fmt="tel"></label>
+          </div>
+          <div class="cols two">
+            <label>Tipo de Crédito *
+              <select name="tipoCredito">${tcs.map((t) => `<option value="${h(t)}">${h(t)}</option>`).join('')}</select>
+            </label>
+            <label>Monto Solicitado (C$) <small>(opcional)</small><input name="monto" type="number" min="1" step="100" placeholder="15000"></label>
+          </div>
+          <div class="cols two">
+            <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="16" placeholder="7777-1111" data-fmt="tel"></label>
+            <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
+          </div>
+          <div id="dup-alert" class="alert" hidden></div>
+          <div class="cols two">
+            <label>Tipo de Negocio<select name="negocio"><option value="">Seleccione…</option>${S.config.negocios.map((n) => `<option>${h(n)}</option>`).join('')}</select></label>
+            <label>¿Por qué plataforma nos contactó?<select name="plataforma">${plats.map((p) => `<option ${p === 'Whatsapp' ? 'selected' : ''}>${h(p)}</option>`).join('')}</select></label>
+          </div>
+          <div class="cols two">
+            <label>Dirección del Negocio / Domicilio<input name="direccion" placeholder="Ej: Del parque 2c al sur, 1c al este"></label>
+            <label>Detalle de Contacto / Campaña<input name="campana" placeholder="Ej: Campaña Facebook / WhatsApp"></label>
+          </div>
+          <label>Notas / Observaciones de Call Center<textarea name="notas" rows="2" placeholder="Detalles relevantes para el Gerente de Sucursal…"></textarea></label>
+          <button class="btn primary block" type="submit">💾 Registrar y Enviar a Gerencia (+ Google Sheets)</button>
+        </form>`;
+      } else {
+        body = `<form class="panel form" data-form="captura-cc" novalidate>
+          <h2>📝 Captura de Prospectos — Con Promotor de Origen</h2>
+          ${modeSwitch}
+          <p class="hint">Registra un prospecto atendido por Call Center (<b>${h(u.nombre)}</b>) asignando el <b>Promotor de Origen</b> y la <b>Sucursal Destino</b>.</p>
+          <div class="cols two">
+            <label>Promotor de Origen (Candado de Origen 🔒) *
+              <select name="promotorOrigenId" required>
+                ${promotoresActivos.map((p) => `<option value="${p.id}">${h(p.nombre)} — ${h(p.sucursal)}</option>`).join('')}
+              </select>
+            </label>
+            <label>Tipo de Crédito *
+              <select name="tipoCredito">${tcs.map((t) => `<option value="${h(t)}">${h(t)}</option>`).join('')}</select>
+            </label>
+          </div>
+          <div class="cols two">
+            <label>Nombre Completo del Cliente *<input name="nombre" required minlength="3" placeholder="Ej: Juan Carlos Pérez Gómez"></label>
+            <label><span class="field-head"><span>Teléfono de Contacto *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="16" placeholder="8888-9999" data-dup data-fmt="tel"></label>
+          </div>
+          <div class="cols two">
+            <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="16" placeholder="7777-1111" data-fmt="tel"></label>
+            <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
+          </div>
+          <div id="dup-alert" class="alert" hidden></div>
+          <div class="cols two">
+            <label>Monto Solicitado (C$) *<input name="monto" type="number" min="1" step="100" required placeholder="15000"></label>
+            <label>Tipo de Negocio *<select name="negocio">${S.config.negocios.map((n) => `<option>${h(n)}</option>`).join('')}</select></label>
+          </div>
+          <div class="cols two">
+            <label>¿Por qué plataforma nos contactó?<select name="plataforma">${plats.map((p) => `<option>${h(p)}</option>`).join('')}</select></label>
+            <label>Detalle de Contacto / Campaña<input name="campana" placeholder="Ej: Campaña Facebook / WhatsApp"></label>
+          </div>
+          <label>Dirección del Negocio / Domicilio *<input name="direccion" required placeholder="Ej: Del parque 2c al sur, 1c al este"></label>
+          <label>Notas iniciales de Call Center<textarea name="notas" rows="2"></textarea></label>
+          <button class="btn primary block" type="submit">💾 Registrar Cliente en Cola</button>
+        </form>`;
+      }
     } else if (tab === 'csv') {
       body = vistaDepuradorCSV(u);
     } else {
       body = `<div class="toolbar-row">
           <div class="quick" style="margin:0">
-            <button class="chip ${ui.f.estado === 'nuevo' ? 'on' : ''}" data-action="qf" data-val="nuevo">Cola nueva (${cola})</button>
-            <button class="chip ${ui.f.estado === 'gestion' ? 'on' : ''}" data-action="qf" data-val="gestion">En gestión (${gest})</button>
-            <button class="chip ${ui.f.estado === 'pescado' ? 'on' : ''}" data-action="qf" data-val="pescado">Pescados (${pesc})</button>
-            <button class="chip ${!ui.f.estado ? 'on' : ''}" data-action="qf" data-val="">Todos (${todos.length})</button>
+            <button class="chip ${ui.f.estado === 'nuevo' && !ui.f.origen ? 'on' : ''}" data-action="qf" data-val="nuevo">Cola nueva (${cola})</button>
+            <button class="chip ${ui.f.estado === 'gestion' && !ui.f.origen ? 'on' : ''}" data-action="qf" data-val="gestion">En gestión (${gest})</button>
+            <button class="chip ${ui.f.estado === 'pescado' && !ui.f.origen ? 'on' : ''}" data-action="qf" data-val="pescado">Pescados (${pesc})</button>
+            <button class="chip ${ui.f.origen === 'callcenter_directo' ? 'on' : ''}" data-action="q-origen" data-val="callcenter_directo">📞 Directo Gerencia (${directos})</button>
+            <button class="chip ${!ui.f.estado && !ui.f.origen ? 'on' : ''}" data-action="qf" data-val="">Todos (${todos.length})</button>
           </div>
           ${viewSwitcherHTML()}
         </div>
@@ -1001,7 +1119,7 @@
     return `<section class="kpis four">
         <div class="kpi"><b>${cola}</b><span>En cola</span></div>
         <div class="kpi amber"><b>${gest}</b><span>En gestión</span></div>
-        <div class="kpi lime"><b>${pesc}</b><span>Pescados</span></div>
+        <div class="kpi lime"><b>${pesc}</b><span>Pescados / Directos</span></div>
         <div class="kpi green"><b>${desem}</b><span>Desembolsados</span></div>
       </section>
       ${tabs('cc', [['bandeja', '📞 Bandeja de Llamadas', cola + gest], ['captura', '📝 Captura Call Center'], ['csv', '📥 Depurador CSV']])}
@@ -1009,27 +1127,40 @@
   }
 
   function vistaGerente(u) {
-    const mios = C.visibles(S, u);
+    const todosSuc = C.visibles(S, u);
+    const mios = !ui.gerOrigen
+      ? todosSuc
+      : todosSuc.filter((p) => (ui.gerOrigen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p)));
     const pesc = mios.filter((p) => p.estado === 'pescado');
     const seg = mios.filter((p) => p.estado === 'seguimiento');
     const desem = mios.filter((p) => p.estado === 'desembolsado');
+    const ccDirectosTotal = todosSuc.filter((p) => C.esCallCenterDirecto(p)).length;
     const montoSuc = desem.reduce((a, p) => a + Number((p.desembolso && p.desembolso.monto) || p.monto || 0), 0);
     const emailGer = (S.config.emailsGerentes && S.config.emailsGerentes[u.sucursal]) || u.email || 'alfacreditenrique@gmail.com';
     const equipo = S.usuarios.filter((x) => x.sucursal === u.sucursal && x.activo && ['promotor', 'gestor'].includes(x.rol));
     const tab = tabActual('ger', 'pescados');
 
+    const origenFilterBar = `<div class="quick" style="margin-bottom:10px">
+      <button type="button" class="chip ${!ui.gerOrigen ? 'on' : ''}" data-action="ger-origen" data-val="">Todos (${todosSuc.length})</button>
+      <button type="button" class="chip ${ui.gerOrigen === 'callcenter_directo' ? 'on' : ''}" data-action="ger-origen" data-val="callcenter_directo">📞 Directo Call Center (${ccDirectosTotal})</button>
+      <button type="button" class="chip ${ui.gerOrigen === 'promotor' ? 'on' : ''}" data-action="ger-origen" data-val="promotor">🔒 Con Promotor (${todosSuc.length - ccDirectosTotal})</button>
+    </div>`;
+
     let body;
-    if (tab === 'pescados') body = lista(pesc, { sello: true }, 'No hay clientes pescados pendientes. ✔');
-    else if (tab === 'seguimiento') body = lista(seg, { sello: true }, 'No hay casos en seguimiento.');
+    if (tab === 'pescados') body = origenFilterBar + lista(pesc, { sello: true }, 'No hay clientes pescados pendientes. ✔');
+    else if (tab === 'seguimiento') body = origenFilterBar + lista(seg, { sello: true }, 'No hay casos en seguimiento.');
     else if (tab === 'equipo') {
       body = `<div class="panel">
         <h3>👥 Equipo Comercial — Sucursal ${h(u.sucursal)} (${equipo.length} integrantes)</h3>
         <div class="table-wrap"><table class="table">
-          <thead><tr><th>Nombre</th><th>Rol</th><th>Usuario</th><th>Captados / Asignados</th><th>Desembolsados</th><th>Monto Colocado</th></tr></thead>
+          <thead><tr><th>Nombre</th><th>Rol</th><th>Usuario</th><th>Origen / Asignados</th><th>CC Directo Asign.</th><th>Desembolsados</th><th>Monto Colocado</th></tr></thead>
           <tbody>${equipo.map((x) => {
             const pros = x.rol === 'promotor'
-              ? mios.filter((p) => p.promotor_origen_id === x.id)
-              : mios.filter((p) => p.gestorId === x.id);
+              ? todosSuc.filter((p) => p.promotor_origen_id === x.id || p.asignadoPromotorId === x.id)
+              : todosSuc.filter((p) => p.gestorId === x.id);
+            const ccAsig = x.rol === 'promotor'
+              ? todosSuc.filter((p) => C.esCallCenterDirecto(p) && p.asignadoPromotorId === x.id).length
+              : todosSuc.filter((p) => C.esCallCenterDirecto(p) && p.gestorId === x.id).length;
             const gan = pros.filter((p) => p.estado === 'desembolsado');
             const m = gan.reduce((a, p) => a + Number((p.desembolso && p.desembolso.monto) || 0), 0);
             return `<tr>
@@ -1037,6 +1168,7 @@
               <td><span class="badge ${x.rol === 'promotor' ? 'b-green' : 'b-blue'}">${h(C.ROLES[x.rol])}</span></td>
               <td><code>${h(x.username)}</code></td>
               <td class="tnum">${pros.length}</td>
+              <td class="tnum">${ccAsig}</td>
               <td class="tnum">${gan.length}</td>
               <td class="money">${money(m)}</td>
             </tr>`;
@@ -1044,13 +1176,13 @@
         </table></div>
       </div>`;
     } else {
-      body = `<div class="toolbar-row"><h3 style="margin:0">Pipeline Sucursal ${h(u.sucursal)}</h3>${viewSwitcherHTML()}</div>
+      body = `${origenFilterBar}<div class="toolbar-row"><h3 style="margin:0">Pipeline Sucursal ${h(u.sucursal)}</h3>${viewSwitcherHTML()}</div>
         <div id="list">${prospectosViewHTML(mios, { sello: true })}</div>`;
     }
 
     return `<div class="row" style="margin-bottom:8px"><h2 class="title" style="margin:0">Sucursal ${h(u.sucursal)}</h2><span class="badge b-blue">✉️ ${h(emailGer)}</span></div>
       <section class="kpis four">
-        <div class="kpi lime"><b>${pesc.length}</b><span>Pescados pendientes</span></div>
+        <div class="kpi lime"><b>${pesc.length}</b><span>Pescados / Por distribuir</span></div>
         <div class="kpi blue"><b>${seg.length}</b><span>En seguimiento</span></div>
         <div class="kpi green"><b>${desem.length}</b><span>Desembolsados</span></div>
         <div class="kpi"><b>${money(montoSuc)}</b><span>Monto sucursal</span></div>
@@ -1255,7 +1387,26 @@
         <div class="panel"><h3>Por sucursal</h3><div class="table-wrap"><table class="table"><thead><tr><th>Sucursal</th><th>Correo Gerencia</th><th>Prospectos</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
           ${Object.entries(m.porSucursal).sort((a, b) => b[1].total - a[1].total).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td><small>${h((S.config.emailsGerentes && S.config.emailsGerentes[s]) || '—')}</small></td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>
         <div class="panel"><h3>Ranking de promotores (comisión por origen)</h3><div class="table-wrap"><table class="table"><thead><tr><th>Promotor</th><th>Sucursal</th><th>Captados</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
-          ${Object.values(m.porPromotor).sort((a, b) => b.monto - a.monto || b.total - a.total).map((x) => `<tr><td>${originBadge({ promotor_nombre: x.nombre, sucursal: x.sucursal }, false)}</td><td>${h(x.sucursal)}</td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>`;
+          ${Object.values(m.porPromotor).sort((a, b) => b.monto - a.monto || b.total - a.total).map((x) => `<tr><td>${originBadge({ promotor_nombre: x.nombre, sucursal: x.sucursal }, false)}</td><td>${h(x.sucursal)}</td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>
+        <div class="panel">
+          <h3>📞 Trazabilidad Call Center Directo (Unificado con Google Sheets · Distribución por Gerencia)</h3>
+          <section class="kpis four" style="margin-top:8px">
+            <div class="kpi"><b>${m.callCenterDirecto.total}</b><span>Total Directos CC</span></div>
+            <div class="kpi amber"><b>${m.callCenterDirecto.sinDistribuir}</b><span>Por distribuir (Gerencia)</span></div>
+            <div class="kpi blue"><b>${m.callCenterDirecto.porEstado.seguimiento || 0}</b><span>En seguimiento</span></div>
+            <div class="kpi green"><b>${m.callCenterDirecto.desembolsados} (${money(m.callCenterDirecto.montoDesembolsado)})</b><span>Desembolsados CC</span></div>
+          </section>
+          ${m.callCenterDirecto.total ? `<div class="cols two">
+            <div class="table-wrap"><table class="table">
+              <thead><tr><th>Sucursal (CC Directo)</th><th>Total</th><th>Pend.</th><th>Seguim.</th><th>Desemb.</th><th>Monto</th></tr></thead>
+              <tbody>${Object.entries(m.callCenterDirecto.porSucursal).sort((a, b) => b[1].total - a[1].total).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td class="tnum">${x.total}</td><td class="tnum">${x.pendientes}</td><td class="tnum">${x.seguimiento}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody>
+            </table></div>
+            <div class="table-wrap"><table class="table">
+              <thead><tr><th>Agente Call Center</th><th>Captados</th><th>Seguim.</th><th>Desemb.</th><th>Deneg.</th><th>Monto</th></tr></thead>
+              <tbody>${Object.values(m.callCenterDirecto.porAgente).sort((a, b) => b.total - a.total).map((x) => `<tr><td><b>${h(x.nombre)}</b></td><td class="tnum">${x.total}</td><td class="tnum">${x.seguimiento}</td><td class="tnum">${x.desembolsado}</td><td class="tnum">${x.descartado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody>
+            </table></div>
+          </div>` : '<p class="hint" style="margin-top:8px">Aún no se han registrado nuevos casos directos de Call Center desde la unificación. Los nuevos casos creados desde la App Python o desde AlfaTrack aparecerán aquí con trazabilidad completa.</p>'}
+        </div>`;
     } else if (tab === 'prospectos') {
       body = `<div class="toolbar-row"><h3 style="margin:0">Pipeline Global (${S.prospectos.length})</h3>${viewSwitcherHTML()}</div>
         ${filtrosHTML()}
@@ -1289,7 +1440,24 @@
     } else if (tab === 'config') {
       const c = S.config;
       const ta = (name, arr) => `<textarea name="${name}" rows="6">${h((arr || []).join('\n'))}</textarea>`;
-      body = `<form class="panel form" data-form="config">
+      const stCC = ui.ccSyncStatus;
+      const apiBase = location.origin && location.origin !== 'null' ? location.origin : 'https://alfatrack-alfacredit.vercel.app';
+      const integPanel = `<div class="panel" style="margin-bottom:12px">
+        <div class="row">
+          <div>
+            <h3>🔗 Integración Call Center Hub (Python) ↔ Google Sheets ↔ AlfaTrack</h3>
+            <p class="hint">Los casos nuevos captados por Call Center (desde la app de Python o desde AlfaTrack) se sincronizan sin duplicados con la hoja <b>"base de datos" → "Clientes"</b> conservando las alertas de correo a Gerentes.</p>
+          </div>
+          <button type="button" class="btn sm ghost" data-action="check-cc-sync">🔄 Verificar Estado</button>
+        </div>
+        <dl class="facts" style="margin-top:8px">
+          <div class="wide"><dt>Webhook Ingesta Python App</dt><dd><code>POST ${h(apiBase)}/api/integrations/callcenter/ingest</code></dd></div>
+          <div><dt>Puente Google Sheets</dt><dd>${stCC ? (stCC.sheets.enabled ? `<span class="badge b-green">🟢 Activo (${h(stCC.sheets.spreadsheetName)} / ${h(stCC.sheets.tabName)})</span>` : `<span class="badge b-amber">🟡 ${h(stCC.sheets.mode)}</span>`) : '<span class="badge b-gray">Toca "Verificar Estado"</span>'}</dd></div>
+          <div><dt>Clave de Integración (API Key)</dt><dd>${stCC ? (stCC.integrationKeyConfigured ? '<span class="badge b-green">🔒 Configurada en Servidor</span>' : '<span class="badge b-amber">⚠️ Usar sesión Call Center / configurar ALFATRACK_INTEGRATION_KEY</span>') : '—'}</dd></div>
+          ${stCC ? `<div class="wide"><dt>Resumen Call Center Directo</dt><dd>${stCC.stats.totalDirectos} casos directos · ${stCC.stats.syncedToSheet} sincronizados en Sheet · ${stCC.stats.pendingSheetSync + stCC.stats.errorSheetSync} pendientes · ${stCC.stats.fromPythonApp} desde App Python · ${stCC.stats.fromWebApp} desde Web</dd></div>` : ''}
+        </dl>
+      </div>`;
+      body = integPanel + `<form class="panel form" data-form="config">
         <h3>Configuración del sistema</h3>
         <fieldset><legend>Nombres de estados del pipeline</legend>${C.ESTADOS.map((e, i) => `<label>${i + 1}. ${e}<input name="estado_${e}" value="${h(c.estados[e])}" required></label>`).join('')}</fieldset>
         <div class="cols">
@@ -1337,9 +1505,15 @@
       const p = pro(m.id);
       if (!p || !C.puedeVer(u, p)) { ui.modal = null; return ''; }
       const g = p.gestorId && user(p.gestorId);
+      const esCC = C.esCallCenterDirecto(p);
+      const resp = esCC ? responsableTexto(p) : '';
+      const ag = (p.cc && p.cc.agente) || 'Call Center';
+      const sealBlock = esCC
+        ? `<div class="seal seal-cc">📞 CASO DIRECTO CALL CENTER · Agente: <b>${h(ag)}</b> · ${h(p.sucursal)} ${sheetSyncBadge(p)}${resp ? `<div style="margin-top:3px">👤 <b>Distribuido a:</b> ${h(resp)}</div>` : '<div style="margin-top:3px">🏢 <em>Pendiente de distribución por Gerencia</em></div>'}</div>`
+        : `<div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> · ${h(p.sucursal)} <em>(No modificable)</em></div>`;
       inner = `<h2>${h(p.nombre)}</h2>
         <div class="actions" style="margin-bottom:8px">${badgeEstado(p.estado)} ${badgeSLA(p)} ${badgeTipoCredito(p.tipoCredito)}</div>
-        <div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> · ${h(p.sucursal)} <em>(No modificable)</em></div>
+        ${sealBlock}
         ${accionesCard(p, { inDrawer: true })}
         ${progreso(p)}
         <dl class="facts">
@@ -1350,11 +1524,12 @@
           <div><dt>Canal / Plataforma</dt><dd>${h(p.plataforma || 'Cambaceo / Campo')}${p.campana ? ' · ' + h(p.campana) : ''}</dd></div>
           <div><dt>Email Gerencia</dt><dd>${h(p.emailGerente || (S.config.emailsGerentes && S.config.emailsGerentes[p.sucursal]) || '—')}</dd></div>
           <div class="wide"><dt>Dirección</dt><dd>${h((p.cc && p.cc.direccionVisita) || p.direccion || '—')}</dd></div>
-          ${p.notas ? `<div class="wide"><dt>Notas del promotor</dt><dd>${h(p.notas)}</dd></div>` : ''}
-          ${g ? `<div class="wide"><dt>Gestor de apoyo</dt><dd>${h(g.nombre)}</dd></div>` : ''}
+          ${p.notas ? `<div class="wide"><dt>Notas</dt><dd>${h(p.notas)}</dd></div>` : ''}
+          ${esCC && resp ? `<div class="wide"><dt>Distribución / Responsable</dt><dd>${h(resp)}</dd></div>` : (g ? `<div class="wide"><dt>Gestor de apoyo</dt><dd>${h(g.nombre)}</dd></div>` : '')}
+          ${esCC && p.sheetSync ? `<div class="wide"><dt>Sincronización Google Sheets</dt><dd>${sheetSyncBadge(p)}${p.sheetSync.lastError ? ` <small style="color:var(--red)">${h(p.sheetSync.lastError)}</small>` : (p.sheetSync.lastFollowUpSyncAt ? ` <small>Seguimiento sincronizado: ${fecha(p.sheetSync.lastFollowUpSyncAt)}</small>` : '')}</dd></div>` : ''}
         </dl>
         ${p.cc && (p.cc.comentarios || p.cc.ultimaGestion) ? `<p class="note cc"><b>📞 Call Center (${h(p.cc.agente)}):</b> ${h(p.cc.comentarios || p.cc.ultimaGestion)}</p>` : ''}
-        ${p.gerencia ? `<p class="note ger"><b>🏢 Gerente (${h(p.gerencia.gerente)}):</b> ${h(p.gerencia.instrucciones)}${g ? `<br><b>Gestor de apoyo:</b> ${h(g.nombre)}` : ''}</p>` : ''}
+        ${p.gerencia ? `<p class="note ger"><b>🏢 Gerente (${h(p.gerencia.gerente)}):</b> ${h(p.gerencia.instrucciones)}${esCC && resp ? `<br><b>Responsable asignado:</b> ${h(resp)}` : (g ? `<br><b>Gestor de apoyo:</b> ${h(g.nombre)}` : '')}</p>` : ''}
         <h3>Bitácora inmutable</h3>${timeline((p.historial || []).slice().reverse())}
         <form data-form="nota" data-id="${p.id}" class="form inline"><input name="texto" placeholder="Agregar nota a la bitácora…" aria-label="Nota"><button class="btn sm primary" type="submit">Agregar</button></form>`;
     } else if (m.type === 'estado') {
@@ -1362,24 +1537,35 @@
       const t = p ? C.transiciones(u, p) : [];
       if (!t.length) { ui.modal = null; return ''; }
       const sel = t.includes(m.pre) ? m.pre : t[0];
+      const esCC = C.esCallCenterDirecto(p);
       const gestores = S.usuarios.filter((x) => x.rol === 'gestor' && x.activo).sort((a, b) => (b.sucursal === p.sucursal) - (a.sucursal === p.sucursal));
-      inner = `<h2>${u.rol === 'callcenter' ? 'Gestión de llamada' : 'Actualizar prospecto'}</h2>
+      const promotoresSuc = S.usuarios.filter((x) => x.rol === 'promotor' && x.activo).sort((a, b) => (b.sucursal === p.sucursal) - (a.sucursal === p.sucursal) || a.nombre.localeCompare(b.nombre));
+      inner = `<h2>${u.rol === 'callcenter' ? 'Gestión de llamada' : (esCC && sel === 'seguimiento' ? 'Distribuir caso Call Center Directo' : 'Actualizar prospecto')}</h2>
         <p><b>${h(p.nombre)}</b> · <span class="tel-num">${telFmt(p.telefono)}</span> · ${badgeEstado(p.estado)} ${badgeTipoCredito(p.tipoCredito)}</p>${originBadge(p, true)}
         <form class="form" data-form="estado" data-id="${p.id}" data-estado="${sel}" style="margin-top:10px">
           <label>Nuevo estado<select name="estado" data-estado-select>${t.map((e) => `<option value="${e}" ${e === sel ? 'selected' : ''}>${h(est(e))}</option>`).join('')}</select></label>
           <div class="only only-gestion"><label>Resultado de la llamada<textarea name="comentarios_gestion" rows="2" placeholder="Ej. No contestó, volver a llamar mañana"></textarea></label></div>
           <div class="only only-pescado">
-            <p class="hint">Confirme los datos. Se notificará al Gerente de ${h(p.sucursal)} (${h((S.config.emailsGerentes && S.config.emailsGerentes[p.sucursal]) || '')}) y al promotor ${h(p.promotor_nombre)}.</p>
+            <p class="hint">Confirme los datos. Se notificará al Gerente de ${h(p.sucursal)} (${h((S.config.emailsGerentes && S.config.emailsGerentes[p.sucursal]) || '')})${esCC ? '.' : ` y al promotor ${h(p.promotor_nombre)}.`}</p>
             <label>Monto solicitado (C$) *<input name="monto" type="number" min="1" value="${h((p.cc && p.cc.monto) || p.monto || '')}"></label>
             <label>Rubro / Negocio *<input name="rubro" value="${h((p.cc && p.cc.rubro) || p.negocio)}"></label>
             <label>Dirección exacta de visita *<input name="direccionVisita" value="${h((p.cc && p.cc.direccionVisita) || p.direccion)}"></label>
             <label>Comentarios de Call Center *<textarea name="comentarios_pescado" rows="3"></textarea></label>
           </div>
           <div class="only only-seguimiento">
-            <div class="seal">🔒 El cierre queda a cargo del Promotor de Origen: <b>${h(p.promotor_nombre)}</b> (no se reemplaza)</div>
-            <label>Gestor de Crédito de apoyo (opcional)<select name="gestorId"><option value="">— Sin gestor, solo el promotor —</option>
-              ${gestores.map((x) => `<option value="${x.id}" ${x.id === p.gestorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})</option>`).join('')}</select></label>
-            <label>Instrucciones para el promotor *<textarea name="instrucciones" rows="3">${h((p.gerencia && p.gerencia.instrucciones) || '')}</textarea></label>
+            ${esCC ? `
+              <div class="seal seal-cc">📞 <b>Caso Directo de Call Center</b> — Distribúyelo a un Promotor, a un Gestor/Oficial de Crédito, a ambos, o atiéndelo directamente desde Gerencia.</div>
+              <label>Asignar a Promotor (opcional)<select name="asignadoPromotorId"><option value="">— Ningún promotor asignado —</option>
+                ${promotoresSuc.map((x) => `<option value="${x.id}" ${x.id === p.asignadoPromotorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})</option>`).join('')}</select></label>
+              <label>Asignar a Gestor / Oficial de Crédito (opcional)<select name="gestorId"><option value="">— Ningún gestor asignado —</option>
+                ${gestores.map((x) => `<option value="${x.id}" ${x.id === p.gestorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})</option>`).join('')}</select></label>
+              <label>Instrucciones / Plan de Seguimiento *<textarea name="instrucciones" rows="3" placeholder="Ej. Contactar hoy, visitar negocio y verificar documentación…">${h((p.gerencia && p.gerencia.instrucciones) || '')}</textarea></label>
+            ` : `
+              <div class="seal">🔒 El cierre queda a cargo del Promotor de Origen: <b>${h(p.promotor_nombre)}</b> (no se reemplaza)</div>
+              <label>Gestor de Crédito de apoyo (opcional)<select name="gestorId"><option value="">— Sin gestor, solo el promotor —</option>
+                ${gestores.map((x) => `<option value="${x.id}" ${x.id === p.gestorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})</option>`).join('')}</select></label>
+              <label>Instrucciones para el promotor *<textarea name="instrucciones" rows="3">${h((p.gerencia && p.gerencia.instrucciones) || '')}</textarea></label>
+            `}
           </div>
           <div class="only only-desembolsado"><label>Monto desembolsado (C$)<input name="monto_desembolso" type="number" min="1" value="${h((p.cc && p.cc.monto) || p.monto || '')}"></label></div>
           <div class="only only-descartado">
@@ -1391,10 +1577,13 @@
     } else if (m.type === 'editar') {
       const p = pro(m.id);
       if (!p || u.rol !== 'admin') { ui.modal = null; return ''; }
+      const esCC = C.esCallCenterDirecto(p);
       const tcs = S.config.tiposCredito || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
       const plats = S.config.plataformas || ['Cambaceo / Campo', 'Whatsapp', 'Facebook', 'Instagram', 'Tik tok', 'Recomendación', 'Otro'];
       inner = `<h2>Editar prospecto</h2>
-        <div class="seal">🔒 Promotor de origen: <b>${h(p.promotor_nombre)}</b> — bloqueado por Candado de Origen</div>
+        ${esCC
+          ? `<div class="seal seal-cc">📞 Origen: <b>Call Center Directo</b> (${h((p.cc && p.cc.agente) || 'Call Center')}) — Candado de Origen bloqueado</div>`
+          : `<div class="seal">🔒 Promotor de origen: <b>${h(p.promotor_nombre)}</b> — bloqueado por Candado de Origen</div>`}
         <form class="form" data-form="editar" data-id="${p.id}">
           <div class="cols two">
             <label>Nombre<input name="nombre" value="${h(p.nombre)}"></label>
@@ -1417,6 +1606,7 @@
             <label>Sucursal<select name="sucursal">${S.config.sucursales.map((s) => `<option ${s === p.sucursal ? 'selected' : ''}>${h(s)}</option>`).join('')}</select></label>
             <label>Gestor asignado<select name="gestorId"><option value="">— Ninguno —</option>${S.usuarios.filter((x) => x.rol === 'gestor' && (x.activo || x.id === p.gestorId)).map((x) => `<option value="${x.id}" ${x.id === p.gestorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})${x.activo ? '' : ' [baja]'}</option>`).join('')}</select></label>
           </div>
+          ${esCC ? `<label>Promotor asignado por Gerencia (opcional)<select name="asignadoPromotorId"><option value="">— Ninguno —</option>${S.usuarios.filter((x) => x.rol === 'promotor' && (x.activo || x.id === p.asignadoPromotorId)).map((x) => `<option value="${x.id}" ${x.id === p.asignadoPromotorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})${x.activo ? '' : ' [baja]'}</option>`).join('')}</select></label>` : ''}
           <label>Notas<textarea name="notas" rows="2">${h(p.notas)}</textarea></label>
           <button class="btn primary block" type="submit">Guardar cambios</button>
         </form>`;
@@ -1712,8 +1902,41 @@
       case 'tab':
         ui.tab[el.dataset.key] = el.dataset.val;
         if (el.dataset.key === 'adm' && el.dataset.val === 'bd' && !ui.db.stats) fetchDbStats();
+        if (el.dataset.key === 'adm' && el.dataset.val === 'config' && !ui.ccSyncStatus) fetchCcSyncStatus();
         render();
         break;
+      case 'cc-modo':
+        ui.ccModo = el.dataset.val === 'promotor' ? 'promotor' : 'directo';
+        render();
+        break;
+      case 'ger-origen':
+        ui.gerOrigen = el.dataset.val || '';
+        render();
+        break;
+      case 'q-origen':
+        ui.f.origen = ui.f.origen === el.dataset.val ? '' : el.dataset.val;
+        if (ui.f.origen) ui.f.estado = '';
+        render();
+        break;
+      case 'check-cc-sync':
+        await fetchCcSyncStatus();
+        toast('Estado de integración Call Center / Google Sheets actualizado.', 'info');
+        break;
+      case 'retry-sheet': {
+        el.disabled = true;
+        await mutate(
+          'reintentarSyncSheet',
+          { id },
+          () => ({ ok: false, error: 'La sincronización con Google Sheets requiere conexión al servidor.' }),
+          (res) => {
+            const ss = res && res.sheetSync;
+            if (ss && ss.ok) return `✅ Sincronizado con Google Sheets (fila #${ss.sheetRow}).`;
+            return (ss && ss.error) ? `⚠️ ${ss.error}` : 'Sincronización con Google Sheets intentada.';
+          },
+          { soundCue: 'admin_ok' }
+        );
+        break;
+      }
       case 'bell': ui.bell = !ui.bell; render(); break;
       case 'leer-todas':
         await mutate('marcarLeidas', {}, () => C.marcarLeidas(S, u.id), null, { soundCue: 'call_saved' });
@@ -1762,11 +1985,15 @@
         const listaExp = filtrar(u.rol === 'admin' ? S.prospectos : C.visibles(S, u));
         const rows = listaExp.map((p) => [
           fecha(p.creado), p.nombre, p.tipoCredito || 'NV(NUEVO)', p.telefono, p.telefonoSecundario || '',
-          p.cedula || '', p.promotor_nombre, p.sucursal, (p.cc && p.cc.monto) || p.monto || 0,
+          p.cedula || '', C.esCallCenterDirecto(p) ? 'Call Center Directo' : 'Promotor',
+          C.esCallCenterDirecto(p) ? ((p.cc && p.cc.agente) || 'Call Center') : p.promotor_nombre,
+          responsableTexto(p) || (p.gestorId && user(p.gestorId) ? user(p.gestorId).nombre : ''),
+          p.sucursal, (p.cc && p.cc.monto) || p.monto || 0,
           (p.cc && p.cc.rubro) || p.negocio || '', (p.cc && p.cc.direccionVisita) || p.direccion || '',
           p.plataforma || 'Cambaceo / Campo', est(p.estado), (p.desembolso && p.desembolso.monto) || '',
+          (p.sheetSync && p.sheetSync.sheetRow) ? `#${p.sheetSync.sheetRow}` : '',
         ]);
-        downloadCSV('Prospectos_AlfaTrack.csv', ['Fecha', 'Cliente', 'Tipo Crédito', 'Teléfono', 'Teléfono 2', 'Cédula', 'Promotor Origen', 'Sucursal', 'Monto Solicitado', 'Negocio', 'Dirección', 'Plataforma', 'Estado', 'Monto Desembolsado'], rows);
+        downloadCSV('Prospectos_AlfaTrack.csv', ['Fecha', 'Cliente', 'Tipo Crédito', 'Teléfono', 'Teléfono 2', 'Cédula', 'Tipo Origen', 'Captado Por', 'Distribuido / Gestor', 'Sucursal', 'Monto Solicitado', 'Negocio', 'Dirección', 'Plataforma', 'Estado', 'Monto Desembolsado', 'Fila Google Sheet'], rows);
         toast('Reporte CSV de prospectos descargado.', 'ok');
         break;
       }
@@ -1887,9 +2114,9 @@
         }
         break;
       }
-      case 'qf': ui.f.estado = el.dataset.val; render(); break;
+      case 'qf': ui.f.estado = el.dataset.val; ui.f.origen = ''; render(); break;
       case 'pf': ui.proFilter = el.dataset.val; render(); break;
-      case 'limpiar-filtros': ui.f = { sucursal: '', estado: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' }; render(); break;
+      case 'limpiar-filtros': ui.f = { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' }; render(); break;
       case 'reset':
         if (confirm('Esto restablece la base de datos inicial. ¿Continuar?')) {
           await mutate('reset', {}, () => { S = C.seed(); return { ok: true }; }, 'Base de datos restablecida.', {
@@ -1903,6 +2130,10 @@
   document.addEventListener('change', (e) => {
     const t = e.target;
     if (t.matches('[data-estado-select]')) t.form.dataset.estado = t.value;
+    else if (t.dataset.change === 'cc-sucursal') {
+      const emailInp = t.form && t.form.querySelector('#cc-email-gerente');
+      if (emailInp) emailInp.value = (S.config.emailsGerentes && S.config.emailsGerentes[t.value]) || 'alfacreditenrique@gmail.com';
+    }
     else if (t.form && t.form.dataset.form === 'filtros' && t.name !== 'q') { ui.f[t.name] = t.value; render(); }
     else if (t.dataset.change === 'user-role') { ui.userRoleFilter = t.value; render(); }
     else if (t.dataset.change === 'user-branch') { ui.userBranchFilter = t.value; render(); }
@@ -2095,6 +2326,35 @@
       return;
     }
 
+    if (kind === 'captura-cc-directo') {
+      setFormBusy(f, true, 'Enviando a Gerencia…');
+      const r = await mutate(
+        'capturarCasoCallCenterDirecto',
+        d,
+        () => C.capturarCasoCallCenterDirecto(S, u, d),
+        (res) => {
+          const p = res && res.prospecto;
+          const ss = p && p.sheetSync;
+          const sheetTxt = ss && ss.status === 'synced' && ss.sheetRow
+            ? ` · Google Sheets fila #${ss.sheetRow} (alerta de correo activada)`
+            : (ss && ss.status === 'error'
+              ? ` · ⚠️ Error sync Google Sheets (reintentar en Historial)`
+              : ' · Guardado en AlfaTrack');
+          return `📞 Caso ${p ? p.nombre : ''} enviado al Gerente de ${p ? p.sucursal : ''}${sheetTxt}.`;
+        },
+        {
+          soundCue: 'pescado',
+          onSuccess: () => { ui.tab.cc = 'bandeja'; },
+        }
+      );
+      if (!r.ok) {
+        setFormBusy(f, false);
+        const box = f.querySelector('#dup-alert') || $('#dup-alert');
+        if (box) { box.hidden = false; box.textContent = '⚠️ ' + r.error; }
+      }
+      return;
+    }
+
     if (kind === 'captura-cc') {
       setFormBusy(f, true, 'Guardando…');
       const r = await mutate(
@@ -2120,7 +2380,7 @@
       const datos = {
         gestion: { comentarios: d.comentarios_gestion },
         pescado: { monto: d.monto, rubro: d.rubro, direccionVisita: d.direccionVisita, comentarios: d.comentarios_pescado },
-        seguimiento: { gestorId: d.gestorId, instrucciones: d.instrucciones },
+        seguimiento: { gestorId: d.gestorId, asignadoPromotorId: d.asignadoPromotorId, instrucciones: d.instrucciones },
         desembolsado: { monto: d.monto_desembolso },
         descartado: { motivo: d.motivo, comentarios: d.comentarios_descarte },
       }[estado] || {};
@@ -2298,7 +2558,7 @@
   });
 
   if ('serviceWorker' in navigator && isHttp()) {
-    navigator.serviceWorker.register('sw.js?v=7', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=8', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
 
   render();

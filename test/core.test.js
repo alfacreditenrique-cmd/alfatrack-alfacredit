@@ -364,4 +364,202 @@ test('Core.upgradeState preserves scoped mode without re-injecting secrets or hi
   assert.strictEqual(scoped.prospectos.length, 0);
 });
 
+test('Call Center Directo: capture without promoter, branch/phone/monto normalization, idempotency & manager distribution', () => {
+  const s = fresh();
+  const betsy = s.usuarios.find((u) => u.username === 'betsy.ruiz');
+  const gerEsteli = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Estelí');
+  const gerLeon = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'León');
+  const proEsteli = s.usuarios.find((u) => u.rol === 'promotor' && u.sucursal === 'Estelí' && u.activo);
+  const gesEsteli = s.usuarios.find((u) => u.rol === 'gestor' && u.sucursal === 'Estelí' && u.activo);
+  const admin = U(s, 'u-admin');
+
+  // 1. Capture from Python app format ("Sucursal Esteli", "+505 8311-2233 / 7722-3344", "C$ 20,000")
+  const r1 = C.capturarCasoCallCenterDirecto(s, betsy, {
+    externalId: 'cc-py-r150-abc',
+    sheetRow: 150,
+    agenteNombre: 'Betsy Ruiz',
+    nombre: 'María Elena Torres',
+    tipoCredito: 'NV(NUEVO)',
+    telefono: '+505 8311-2233 / 7722-3344',
+    sucursal: 'Sucursal Esteli',
+    emailGerente: 'gerenteesteli7@gmail.com',
+    monto: 'C$ 20,000',
+    negocio: 'Pulpería',
+    direccion: 'Barrio El Calvario 2c al sur',
+    plataforma: 'Facebook',
+    campana: 'Campaña Noviembre',
+    origenApp: 'python_callcenter',
+  });
+  assert.ok(r1.ok, r1.error);
+  assert.strictEqual(r1.deduplicated, false);
+  const p = r1.prospecto;
+  assert.strictEqual(C.esCallCenterDirecto(p), true);
+  assert.strictEqual(p.sucursal, 'Estelí');
+  assert.strictEqual(p.telefono, '83112233');
+  assert.strictEqual(p.telefonoSecundario, '77223344');
+  assert.strictEqual(p.monto, 20000);
+  assert.strictEqual(p.estado, 'pescado', 'arrives directly at Branch Manager inbox');
+  assert.strictEqual(p.promotor_origen_id, C.ORIGEN_CC_ID);
+  assert.strictEqual(p.sheetSync.status, 'synced');
+  assert.strictEqual(p.sheetSync.sheetRow, 150);
+  assert.ok(r1.notificaciones.some((n) => n.userId === gerEsteli.id), 'notifies branch manager');
+
+  // 2. Visibility before distribution: Gerente Estelí & Call Center & Admin see it; Promoter & other branch manager do NOT
+  assert.ok(C.puedeVer(gerEsteli, p));
+  assert.ok(C.puedeVer(betsy, p));
+  assert.ok(C.puedeVer(admin, p));
+  assert.ok(!C.puedeVer(proEsteli, p));
+  assert.ok(!C.puedeVer(gerLeon, p));
+
+  // 3. Idempotent retry by externalId or sheetRow does NOT duplicate
+  const rDupExt = C.capturarCasoCallCenterDirecto(s, betsy, {
+    externalId: 'cc-py-r150-abc',
+    nombre: 'María Elena Torres',
+    telefono: '8311-2233',
+    sucursal: 'Sucursal Esteli',
+  });
+  assert.ok(rDupExt.ok);
+  assert.strictEqual(rDupExt.deduplicated, true);
+  assert.strictEqual(rDupExt.prospecto.id, p.id);
+
+  const rDupRow = C.capturarCasoCallCenterDirecto(s, betsy, {
+    sheetRow: 150,
+    nombre: 'María Elena Torres',
+    telefono: '8311-2233',
+    sucursal: 'Sucursal Esteli',
+  });
+  assert.ok(rDupRow.ok && rDupRow.deduplicated === true);
+
+  // 4. Different lead with same phone is blocked as duplicate
+  const rDupPhone = C.capturarCasoCallCenterDirecto(s, betsy, {
+    externalId: 'cc-py-r151-xyz',
+    sheetRow: 151,
+    nombre: 'Otro Nombre',
+    telefono: '83112233',
+    sucursal: 'Sucursal Managua',
+  });
+  assert.ok(!rDupPhone.ok);
+  assert.strictEqual(rDupPhone.duplicate, true);
+  assert.match(rDupPhone.error, /Call Center Directo/);
+
+  // 5. Cross-branch manager cannot distribute
+  assert.ok(!C.cambiarEstado(s, gerLeon, p.id, 'seguimiento', { instrucciones: 'Intento externo' }).ok);
+
+  // 6. Branch Manager distributes to Promotor + Gestor; both see it, promoter can add follow-up note, CC agent notified
+  const rDist = C.cambiarEstado(s, gerEsteli, p.id, 'seguimiento', {
+    asignadoPromotorId: proEsteli.id,
+    gestorId: gesEsteli.id,
+    instrucciones: 'Visitar hoy por la tarde y levantar expediente.',
+  });
+  assert.ok(rDist.ok, rDist.error);
+  assert.strictEqual(p.asignadoPromotorId, proEsteli.id);
+  assert.strictEqual(p.asignadoPromotorNombre, proEsteli.nombre);
+  assert.strictEqual(p.gestorId, gesEsteli.id);
+  assert.strictEqual(p.promotor_origen_id, C.ORIGEN_CC_ID, 'origin remains Call Center Directo');
+  assert.ok(C.puedeVer(proEsteli, p), 'assigned promoter now sees the case');
+  assert.ok(C.puedeVer(gesEsteli, p), 'assigned gestor now sees the case');
+  assert.ok(rDist.notificaciones.some((n) => n.userId === proEsteli.id));
+  assert.ok(rDist.notificaciones.some((n) => n.userId === gesEsteli.id));
+  assert.ok(rDist.notificaciones.some((n) => n.userId === betsy.id));
+
+  // Assigned promoter adds follow-up note; cannot force state transitions
+  assert.ok(C.agregarNota(s, proEsteli, p.id, 'Visitada en pulpería, entrega cédula mañana.').ok);
+  assert.ok(!C.cambiarEstado(s, proEsteli, p.id, 'desembolsado', { monto: 20000 }).ok);
+
+  // Admin cannot override Call Center origin lock either
+  assert.ok(!C.adminEditarProspecto(s, admin, p.id, { promotor_origen_id: proEsteli.id }).ok);
+
+  // 7. Gestor closes as desembolsado; metrics track Call Center Directo separately from street promoter commissions
+  const rClose = C.cambiarEstado(s, gesEsteli, p.id, 'desembolsado', { monto: 20000 });
+  assert.ok(rClose.ok, rClose.error);
+  const m = C.metricas(s);
+  assert.strictEqual(m.porPromotor[C.ORIGEN_CC_ID], undefined, 'CC Directo must not pollute street promoter commission table');
+  assert.strictEqual(m.callCenterDirecto.total, 1);
+  assert.strictEqual(m.callCenterDirecto.desembolsados, 1);
+  assert.strictEqual(m.callCenterDirecto.montoDesembolsado, 20000);
+  assert.strictEqual(m.callCenterDirecto.porSucursal['Estelí'].desembolsado, 1);
+  assert.strictEqual(m.callCenterDirecto.porAgente['Betsy Ruiz'].desembolsado, 1);
+
+  // 8. Direct manager handling (no promoter, no gestor) & dash monto ("-") works cleanly
+  const r2 = C.capturarCasoCallCenterDirecto(s, betsy, {
+    nombre: 'Carlos Alberto Morales',
+    telefono: '8777-1122',
+    sucursal: 'Sucursal Sebaco',
+    monto: '-',
+    origenApp: 'alfatrack',
+  });
+  assert.ok(r2.ok, r2.error);
+  assert.strictEqual(r2.prospecto.sucursal, 'Sébaco');
+  assert.strictEqual(r2.prospecto.monto, 0);
+  const gerSebaco = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Sébaco');
+  const rDir = C.cambiarEstado(s, gerSebaco, r2.prospecto.id, 'seguimiento', {
+    instrucciones: 'Atención directa por gerencia en oficina.',
+  });
+  assert.ok(rDir.ok, rDir.error);
+  assert.strictEqual(r2.prospecto.gerencia.tipoDistribucion, 'gerencia_directa');
+});
+
+test('Call Center Directo adversarial edge cases: real dual phones, negative/dot montos, branch matching, atomic validation & admin sync', () => {
+  const s = fresh();
+  const betsy = s.usuarios.find((u) => u.username === 'betsy.ruiz');
+  const gerEsteli = s.usuarios.find((u) => u.rol === 'gerente' && u.sucursal === 'Estelí');
+  const proEsteli = s.usuarios.find((u) => u.rol === 'promotor' && u.sucursal === 'Estelí' && u.activo);
+  const gesEsteli = s.usuarios.find((u) => u.rol === 'gestor' && u.sucursal === 'Estelí' && u.activo);
+  const admin = U(s, 'u-admin');
+
+  // 1. Real production phone strings from Call Center clientes_cache.json
+  assert.deepStrictEqual(C.limpiarTelefonoCC('86962464 - 57962751'), { telefono: '86962464', telefonoSecundario: '57962751' });
+  assert.deepStrictEqual(C.limpiarTelefonoCC('82397793-87803687'), { telefono: '82397793', telefonoSecundario: '87803687' });
+  assert.deepStrictEqual(C.limpiarTelefonoCC('8888-9999 y 7777-1111'), { telefono: '88889999', telefonoSecundario: '77771111' });
+  assert.deepStrictEqual(C.limpiarTelefonoCC('+505 8811 2233'), { telefono: '88112233', telefonoSecundario: '' });
+
+  // 2. parseMonto handles negatives, dot-thousands, and decimals safely
+  assert.strictEqual(C.parseMonto('-500'), '');
+  assert.strictEqual(C.parseMonto('C$ -15,000'), '');
+  assert.strictEqual(C.parseMonto('C$ 15.000'), 15000);
+  assert.strictEqual(C.parseMonto('C$ 1.500.000'), 1500000);
+  assert.strictEqual(C.parseMonto('C$ 15,000.50'), 15000.5);
+  assert.strictEqual(C.parseMonto('C$0'), '');
+
+  // 3. normalizarSucursal does not falsely match short strings to Casa Matriz, and honors custom emailsGerentes
+  assert.strictEqual(C.normalizarSucursal('a', ''), '');
+  assert.strictEqual(C.normalizarSucursal('ma', ''), '');
+  assert.strictEqual(C.normalizarSucursal('', 'custom-esteli@alfa.ni', s.config.sucursales, { 'Estelí': 'custom-esteli@alfa.ni' }), 'Estelí');
+
+  // 4. Validation failure on asignadoPromotorId must NOT corrupt p.gestorId
+  const cap = C.capturarCasoCallCenterDirecto(s, betsy, {
+    nombre: 'Cliente Atomicidad CC',
+    telefono: '86962464 - 57962751',
+    sucursal: 'Sucursal Esteli',
+    monto: 'C$ 15.000',
+  });
+  assert.ok(cap.ok, cap.error);
+  const p = cap.prospecto;
+  assert.strictEqual(p.telefono, '86962464');
+  assert.strictEqual(p.telefonoSecundario, '57962751');
+  assert.strictEqual(p.monto, 15000);
+
+  const failDist = C.cambiarEstado(s, gerEsteli, p.id, 'seguimiento', {
+    gestorId: gesEsteli.id,
+    asignadoPromotorId: 'u-inexistente',
+    instrucciones: 'Debe fallar sin mutar gestorId',
+  });
+  assert.ok(!failDist.ok);
+  assert.strictEqual(p.gestorId, null, 'gestorId must remain null when asignadoPromotorId validation fails');
+
+  // 5. Distribute cleanly, then Admin clears asignadoPromotorId & changes sucursal -> gerencia.asignadoA & notifications stay consistent
+  assert.ok(C.cambiarEstado(s, gerEsteli, p.id, 'seguimiento', {
+    asignadoPromotorId: proEsteli.id,
+    instrucciones: 'Evaluar negocio',
+  }).ok);
+  assert.match(p.gerencia.asignadoA, /Carlos Rivera/);
+
+  const ed = C.adminEditarProspecto(s, admin, p.id, { asignadoPromotorId: '', sucursal: 'León' });
+  assert.ok(ed.ok, ed.error);
+  assert.strictEqual(p.asignadoPromotorId, null);
+  assert.match(p.gerencia.asignadoA, /Gerencia directa/);
+  assert.ok(ed.notificaciones.some((n) => /caso directo/i.test(n.texto)), 'new branch manager gets Call Center Directo notification template');
+});
+
+
 

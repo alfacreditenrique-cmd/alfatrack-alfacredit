@@ -172,6 +172,10 @@ async function ensureSchema() {
       sucursal TEXT NOT NULL,
       estado TEXT NOT NULL,
       gestor_id TEXT,
+      origen_tipo TEXT DEFAULT 'promotor',
+      asignado_promotor_id TEXT,
+      sheet_row INTEGER,
+      external_id TEXT,
       motivo_descarte TEXT,
       cc_json TEXT,
       gerencia_json TEXT,
@@ -213,7 +217,26 @@ async function ensureSchema() {
     )`,
   ];
   const r = await tursoPipeline(ddl);
-  if (r.ok) schemaInitialized = true;
+  if (!r.ok) return r;
+
+  // Idempotent column migration for existing production Turso tables
+  const infoRes = await tursoPipeline(['PRAGMA table_info(alfatrack_prospectos)']);
+  if (!infoRes.ok || !infoRes.results || !infoRes.results[0]) {
+    return infoRes;
+  }
+  const cols = new Set(parseTursoResult(infoRes.results[0]).rows.map((row) => String(row.name || '').toLowerCase()));
+  const alters = [];
+  if (!cols.has('origen_tipo')) alters.push(`ALTER TABLE alfatrack_prospectos ADD COLUMN origen_tipo TEXT DEFAULT 'promotor'`);
+  if (!cols.has('asignado_promotor_id')) alters.push(`ALTER TABLE alfatrack_prospectos ADD COLUMN asignado_promotor_id TEXT`);
+  if (!cols.has('sheet_row')) alters.push(`ALTER TABLE alfatrack_prospectos ADD COLUMN sheet_row INTEGER`);
+  if (!cols.has('external_id')) alters.push(`ALTER TABLE alfatrack_prospectos ADD COLUMN external_id TEXT`);
+  for (const sql of alters) {
+    const ar = await tursoPipeline([sql]);
+    if (!ar.ok && !/duplicate column/i.test(String(ar.error || ''))) {
+      return ar;
+    }
+  }
+  schemaInitialized = true;
   return r;
 }
 
@@ -267,12 +290,15 @@ function stmtUpsertUsuario(u, ts) {
 }
 
 function stmtUpsertProspecto(p) {
+  const origenTipo = Core.esCallCenterDirecto(p) ? 'callcenter_directo' : 'promotor';
+  const sheetRow = (p.sheetSync && Number(p.sheetSync.sheetRow) > 0) ? Number(p.sheetSync.sheetRow) : null;
   return {
     sql: `INSERT INTO alfatrack_prospectos (
             id, nombre, telefono, telefono_secundario, cedula, tipo_credito, direccion, negocio, monto,
             plataforma, campana, email_gerente, notas, promotor_origen_id, promotor_nombre, sucursal_origen,
-            sucursal, estado, gestor_id, motivo_descarte, cc_json, gerencia_json, desembolso_json, historial_json, creado, actualizado
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sucursal, estado, gestor_id, origen_tipo, asignado_promotor_id, sheet_row, external_id,
+            motivo_descarte, cc_json, gerencia_json, desembolso_json, historial_json, creado, actualizado
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             nombre = excluded.nombre,
             telefono = excluded.telefono,
@@ -290,6 +316,10 @@ function stmtUpsertProspecto(p) {
             sucursal = excluded.sucursal,
             estado = excluded.estado,
             gestor_id = excluded.gestor_id,
+            origen_tipo = excluded.origen_tipo,
+            asignado_promotor_id = excluded.asignado_promotor_id,
+            sheet_row = excluded.sheet_row,
+            external_id = excluded.external_id,
             motivo_descarte = excluded.motivo_descarte,
             cc_json = excluded.cc_json,
             gerencia_json = excluded.gerencia_json,
@@ -301,7 +331,8 @@ function stmtUpsertProspecto(p) {
       p.tipoCredito || 'NV(NUEVO)', p.direccion || '', p.negocio || '', Number(p.monto) || 0,
       p.plataforma || 'Cambaceo / Campo', p.campana || '', p.emailGerente || '', p.notas || '',
       p.promotor_origen_id, p.promotor_nombre, p.sucursal_origen || p.sucursal, p.sucursal,
-      p.estado, p.gestorId || null, p.motivoDescarte || '',
+      p.estado, p.gestorId || null, origenTipo, p.asignadoPromotorId || null, sheetRow, p.externalId || '',
+      p.motivoDescarte || '',
       p.cc ? JSON.stringify(p.cc) : null,
       p.gerencia ? JSON.stringify(p.gerencia) : null,
       p.desembolso ? JSON.stringify(p.desembolso) : null,
@@ -419,25 +450,7 @@ async function syncStateToTurso(state) {
 
   stmts.push('DELETE FROM alfatrack_prospectos');
   for (const p of state.prospectos) {
-    stmts.push({
-      sql: `INSERT INTO alfatrack_prospectos (
-              id, nombre, telefono, telefono_secundario, cedula, tipo_credito, direccion, negocio, monto,
-              plataforma, campana, email_gerente, notas, promotor_origen_id, promotor_nombre, sucursal_origen,
-              sucursal, estado, gestor_id, motivo_descarte, cc_json, gerencia_json, desembolso_json, historial_json, creado, actualizado
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        p.id, p.nombre, p.telefono, p.telefonoSecundario || '', p.cedula || '',
-        p.tipoCredito || 'NV(NUEVO)', p.direccion || '', p.negocio || '', Number(p.monto) || 0,
-        p.plataforma || 'Cambaceo / Campo', p.campana || '', p.emailGerente || '', p.notas || '',
-        p.promotor_origen_id, p.promotor_nombre, p.sucursal_origen || p.sucursal, p.sucursal,
-        p.estado, p.gestorId || null, p.motivoDescarte || '',
-        p.cc ? JSON.stringify(p.cc) : null,
-        p.gerencia ? JSON.stringify(p.gerencia) : null,
-        p.desembolso ? JSON.stringify(p.desembolso) : null,
-        JSON.stringify(p.historial || []),
-        p.creado, p.actualizado,
-      ],
-    });
+    stmts.push(stmtUpsertProspecto(p));
   }
 
   stmts.push('DELETE FROM alfatrack_notificaciones');
@@ -652,8 +665,10 @@ async function queryTable(tableName, limit) {
     rows = state.prospectos.map((p) => ({
       id: p.id, nombre: p.nombre, telefono: p.telefono, cedula: p.cedula || '',
       tipo_credito: p.tipoCredito || 'NV(NUEVO)', negocio: p.negocio || '', monto: p.monto,
-      plataforma: p.plataforma || '', promotor_origen_id: p.promotor_origen_id,
-      promotor_nombre: p.promotor_nombre, sucursal: p.sucursal, estado: p.estado,
+      plataforma: p.plataforma || '', origen_tipo: Core.esCallCenterDirecto(p) ? 'callcenter_directo' : 'promotor',
+      promotor_origen_id: p.promotor_origen_id, promotor_nombre: p.promotor_nombre,
+      asignado_promotor_id: p.asignadoPromotorId || '', gestor_id: p.gestorId || '',
+      sheet_row: (p.sheetSync && p.sheetSync.sheetRow) || '', external_id: p.externalId || '', sucursal: p.sucursal, estado: p.estado,
       creado: p.creado, actualizado: p.actualizado,
     }));
   } else if (tableName === 'alfatrack_notificaciones') {
