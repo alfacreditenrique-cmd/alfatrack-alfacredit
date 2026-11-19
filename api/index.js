@@ -65,7 +65,9 @@ function parseCookies(cookieHeader) {
     if (idx > 0) {
       const k = part.slice(0, idx).trim();
       const v = part.slice(idx + 1).trim();
-      if (k) out[k] = decodeURIComponent(v);
+      if (k) {
+        try { out[k] = decodeURIComponent(v); } catch { out[k] = v; }
+      }
     }
   });
   return out;
@@ -134,8 +136,14 @@ function setAuthCookie(res, req, token) {
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
-function clearAuthCookie(res) {
-  res.setHeader('Set-Cookie', 'alfatrack_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+function clearAuthCookie(res, req) {
+  const isSecure = Boolean(
+    process.env.VERCEL ||
+    (req && req.headers && req.headers['x-forwarded-proto'] === 'https')
+  );
+  const parts = ['alfatrack_token=', 'HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=0'];
+  if (isSecure) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
 }
 
 function readBody(req) {
@@ -167,7 +175,9 @@ async function runAtomicMutation(mutatorFn) {
       const { state, rev } = await DB.getState();
       const out = await mutatorFn(state, rev);
       if (!out || !out.ok) return out;
-      if (out.skipSave) return out;
+      if (out.skipSave) {
+        return Object.assign({}, out, { state, tursoSynced: true, rev });
+      }
       const syncInfo = await DB.saveState(state, {
         delta: out.fullSync ? null : out.delta,
         expectedRev: rev,
@@ -229,7 +239,7 @@ module.exports = async function handler(req, res) {
 
     // 2b. Logout (clears HttpOnly session cookie)
     if (pathname === '/api/auth/logout' && method === 'POST') {
-      clearAuthCookie(res);
+      clearAuthCookie(res, req);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -319,8 +329,11 @@ module.exports = async function handler(req, res) {
       const out = await runAtomicMutation((state) => {
         const actor = authenticateActor(req, state);
         if (!actor) return { ok: false, status: 401, error: 'Sesión requerida o expirada.' };
+        const notifBefore = state.notificaciones.length;
+        const auditBefore = state.auditoria.length;
         let result;
         let delta = {};
+        let skipSave = false;
 
         switch (action) {
           case 'crearProspecto':
@@ -329,15 +342,18 @@ module.exports = async function handler(req, res) {
             break;
           case 'capturarProspectoCallCenter':
             result = Core.capturarProspectoCallCenter(state, actor, payload || {});
-            if (result.ok) delta = { prospectos: [result.prospecto], notificaciones: result.notificaciones || [] };
+            if (result.ok) delta = { prospectos: [result.prospecto] };
             break;
           case 'importarFilasCSV':
             result = Core.importarFilasCSV(state, actor, (payload && payload.filas) || [], (payload && payload.opts) || {});
-            if (result.ok) delta = { prospectos: result.importados || [], auditoria: result.importados && result.importados.length ? state.auditoria.slice(-1) : [] };
+            if (result.ok) {
+              delta = { prospectos: result.importados || [] };
+              if (!delta.prospectos.length) skipSave = true;
+            }
             break;
           case 'cambiarEstado':
             result = Core.cambiarEstado(state, actor, payload && payload.id, payload && payload.estado, (payload && payload.datos) || {});
-            if (result.ok) delta = { prospectos: [result.prospecto], notificaciones: result.notificaciones || [] };
+            if (result.ok) delta = { prospectos: [result.prospecto] };
             break;
           case 'agregarNota':
             result = Core.agregarNota(state, actor, payload && payload.id, payload && payload.texto);
@@ -345,7 +361,10 @@ module.exports = async function handler(req, res) {
             break;
           case 'adminEditarProspecto':
             result = Core.adminEditarProspecto(state, actor, payload && payload.id, (payload && payload.patch) || {});
-            if (result.ok && !result.sinCambios) delta = { prospectos: [result.prospecto], notificaciones: result.notificaciones || [] };
+            if (result.ok) {
+              if (result.sinCambios) skipSave = true;
+              else delta = { prospectos: [result.prospecto] };
+            }
             break;
           case 'guardarUsuario':
             result = Core.guardarUsuario(state, actor, payload || {});
@@ -353,29 +372,28 @@ module.exports = async function handler(req, res) {
               delta = {
                 usuarios: [result.usuario],
                 prospectos: state.prospectos.filter((p) => p.promotor_origen_id === result.usuario.id),
-                auditoria: state.auditoria.slice(-1),
               };
             }
             break;
           case 'toggleUsuario':
             result = Core.toggleUsuario(state, actor, payload && payload.id);
-            if (result.ok) delta = { usuarios: [result.usuario], auditoria: state.auditoria.slice(-1) };
+            if (result.ok) delta = { usuarios: [result.usuario] };
             break;
           case 'cambiarPassword':
             result = Core.cambiarPassword(state, actor, payload && payload.targetUserId, payload && payload.passwordActual, payload && payload.passwordNueva);
-            if (result.ok) delta = { usuarios: [result.usuario], auditoria: state.auditoria.slice(-1) };
+            if (result.ok) delta = { usuarios: [result.usuario] };
             break;
           case 'guardarConfig':
             result = Core.guardarConfig(state, actor, (payload && payload.config) || {});
-            if (result.ok) delta = { config: true, auditoria: state.auditoria.slice(-1) };
+            if (result.ok) delta = { config: true };
             break;
           case 'marcarLeidas': {
             const notifId = payload && payload.id;
+            const changed = state.notificaciones.filter((n) => n.userId === actor.id && (!notifId || n.id === notifId) && (!n.leida || !n.toasted));
             result = Core.marcarLeidas(state, actor.id, notifId);
             if (result.ok) {
-              delta = {
-                notificaciones: state.notificaciones.filter((n) => n.userId === actor.id && (!notifId || n.id === notifId)),
-              };
+              if (!changed.length) skipSave = true;
+              else delta = { notificaciones: changed };
             }
             break;
           }
@@ -387,9 +405,16 @@ module.exports = async function handler(req, res) {
           return { ok: false, status: 400, error: (result && result.error) || 'Error en la operación.', result };
         }
 
+        if (!skipSave) {
+          const newNotifs = state.notificaciones.slice(notifBefore);
+          if (newNotifs.length) delta.notificaciones = (delta.notificaciones || []).concat(newNotifs);
+          const newAudit = state.auditoria.slice(auditBefore);
+          if (newAudit.length) delta.auditoria = (delta.auditoria || []).concat(newAudit);
+        }
+
         const safeResult = Object.assign({}, result);
         if (safeResult.usuario) safeResult.usuario = sanitizeUser(safeResult.usuario, actor.rol === 'admin');
-        return { ok: true, actor, result: safeResult, delta };
+        return { ok: true, actor, result: safeResult, delta, skipSave };
       });
 
       if (!out.ok) {

@@ -17,33 +17,54 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+const PUBLIC_STATIC_FILES = new Set([
+  '/index.html',
+  '/styles.css',
+  '/core.js',
+  '/sound.js',
+  '/app.js',
+  '/icon.svg',
+  '/manifest.webmanifest',
+  '/sw.js',
+]);
+
 function createServer() {
   return http.createServer(async (req, res) => {
-    const parsed = new URL(req.url || '/', 'http://localhost');
-    if (parsed.pathname === '/api' || parsed.pathname.startsWith('/api/')) {
-      return apiHandler(req, res);
-    }
-
-    let relPath = decodeURIComponent(parsed.pathname);
-    if (relPath === '/' || relPath === '' || relPath === '/turso' || relPath === '/db' || relPath === '/gestor-db.html') relPath = '/index.html';
-    const safePath = path.normalize(path.join(__dirname, relPath));
-    if (!safePath.startsWith(__dirname) || relPath.startsWith('/storage') || relPath.startsWith('/.') || /credenciales/i.test(relPath)) {
-      res.statusCode = 403;
-      return res.end('Forbidden');
-    }
-
     try {
-      const stat = fs.statSync(safePath);
-      const filePath = stat.isDirectory() ? path.join(safePath, 'index.html') : safePath;
-      const ext = path.extname(filePath).toLowerCase();
-      const data = fs.readFileSync(filePath);
+      const parsed = new URL(req.url || '/', 'http://localhost');
+      if (parsed.pathname === '/api' || parsed.pathname.startsWith('/api/')) {
+        return await apiHandler(req, res);
+      }
+
+      let relPath;
+      try {
+        relPath = decodeURIComponent(parsed.pathname);
+      } catch {
+        res.statusCode = 400;
+        return res.end('Bad Request');
+      }
+      if (relPath === '/' || relPath === '' || relPath === '/turso' || relPath === '/db' || relPath === '/gestor-db.html') relPath = '/index.html';
+      if (!PUBLIC_STATIC_FILES.has(relPath)) {
+        res.statusCode = 403;
+        return res.end('Forbidden');
+      }
+      const safePath = path.normalize(path.join(__dirname, relPath));
+      if (!safePath.startsWith(__dirname)) {
+        res.statusCode = 403;
+        return res.end('Forbidden');
+      }
+
+      const ext = path.extname(safePath).toLowerCase();
+      const data = fs.readFileSync(safePath);
       res.statusCode = 200;
       res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.end(data);
     } catch {
-      res.statusCode = 404;
-      res.end('Not Found');
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end('Internal Server Error');
+      }
     }
   });
 }

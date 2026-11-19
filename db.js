@@ -481,13 +481,14 @@ async function getState() {
       if (parsed.rows.length && parsed.rows[0].payload_json) {
         try {
           const rawState = JSON.parse(parsed.rows[0].payload_json);
-          const rev = Number(parsed.rows[0].version || 1);
+          let rev = Number(parsed.rows[0].version || 1);
           const beforeStr = JSON.stringify(rawState.usuarios || []);
           const s = upgradeState(rawState);
-          writeLocalStore(s, undefined, rev);
           if (JSON.stringify(s.usuarios) !== beforeStr) {
-            await syncStateToTurso(s);
+            const upRes = await syncStateToTurso(s);
+            if (upRes && upRes.ok) rev += 1;
           }
+          writeLocalStore(s, undefined, rev);
           return { state: s, source: 'turso', latencyMs: r.latencyMs, rev };
         } catch {}
       }
@@ -531,8 +532,8 @@ async function saveState(state, opts) {
     return { ok: false, conflict: true, error: res.error };
   }
 
-  const nextRev = opts.expectedRev ? Number(opts.expectedRev) + 1 : writeLocalStore(clean);
-  writeLocalStore(clean, undefined, nextRev);
+  const hasExpectedRev = opts.expectedRev !== undefined && opts.expectedRev !== null;
+  const nextRev = writeLocalStore(clean, undefined, hasExpectedRev ? Number(opts.expectedRev) + 1 : undefined);
   return { ok: true, tursoSynced: Boolean(res && res.ok), latencyMs: (res && res.latencyMs) || 1, rev: nextRev };
 }
 

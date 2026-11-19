@@ -15,7 +15,9 @@
   const fecha = (iso) => (iso ? new Date(iso).toLocaleString('es-NI', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
   const fechaCorta = (iso) => (iso ? new Date(iso).toLocaleDateString('es-NI', { day: '2-digit', month: 'short' }) : '—');
   const telFmt = (t) => {
-    const d = C.soloDigitos(t).slice(0, 8);
+    let d = C.soloDigitos(t);
+    if (d.length === 11 && d.startsWith('505')) d = d.slice(3);
+    d = d.slice(0, 8);
     return d.length > 4 ? `${d.slice(0, 4)}-${d.slice(4)}` : d;
   };
   const cedFmt = (c) => {
@@ -34,9 +36,30 @@
   let S = load();
   let knownNotifIds = new Set();
   let knownProspects = new Map();
+  let toastedNotifIds = new Set();
   let lastPollTs = 0;
   let dupCheckSeq = 0;
   let lastDupAlertKey = '';
+
+  function loadToastedIds(userId) {
+    if (!userId) return new Set();
+    try {
+      const raw = sessionStorage.getItem('alfatrack_toasted_' + userId);
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch { return new Set(); }
+  }
+  function saveToastedIds(userId) {
+    if (!userId) return;
+    try {
+      sessionStorage.setItem('alfatrack_toasted_' + userId, JSON.stringify([...toastedNotifIds].slice(-300)));
+    } catch {}
+  }
+  function hydrateToasted(state) {
+    (state.notificaciones || []).forEach((n) => {
+      if (n.toasted) toastedNotifIds.add(n.id);
+      else if (toastedNotifIds.has(n.id)) n.toasted = true;
+    });
+  }
 
   const savedView = localStorage.getItem(VIEW_KEY);
   const defaultView = () => (window.innerWidth >= 1024 ? 'tabla' : 'tarjetas');
@@ -104,23 +127,46 @@
     knownNotifIds = new Set((state.notificaciones || []).map((n) => n.id));
     knownProspects = new Map((state.prospectos || []).map((p) => [p.id, p.estado]));
   }
-  if (ui.autenticado) snapshotKnown(S);
+  if (ui.autenticado) {
+    toastedNotifIds = loadToastedIds(ui.userId);
+    hydrateToasted(S);
+    snapshotKnown(S);
+  }
 
   const user = (id) => (S.usuarios || []).find((u) => u.id === id);
   const pro = (id) => (S.prospectos || []).find((p) => p.id === id);
   const me = () => user(ui.userId);
   const est = (e) => (S.config && S.config.estados && S.config.estados[e]) || e;
 
-  function isUserTyping() {
+  function isFormProtected() {
     const a = document.activeElement;
-    return Boolean(a && a.closest('form[data-form="nuevo"], form[data-form="captura-cc"], form[data-form="config"], form[data-form="db-sql"], .modal form, [data-input="csv-text"]'));
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+    if (ui.modal && !['ver', 'sonido'].includes(ui.modal.type)) return true;
+    if (ui.modal && ui.modal.type === 'ver') {
+      const notaInp = $('form[data-form="nota"] input[name="texto"]');
+      if (notaInp && notaInp.value.trim()) return true;
+    }
+    if ($('form[data-form="config"]')) return true;
+    const createForm = $('form[data-form="nuevo"], form[data-form="captura-cc"]');
+    if (createForm) {
+      for (const name of ['nombre', 'telefono', 'telefonoSecundario', 'cedula', 'monto', 'direccion', 'campana', 'notas']) {
+        const fld = createForm.elements[name];
+        if (fld && String(fld.value || '').trim()) return true;
+      }
+    }
+    return false;
   }
 
   function setAuthenticatedSession(u, token, state, rev) {
     ui.userId = u.id;
     ui.autenticado = true;
     ui.token = token || ('at_local_' + u.id);
-    if (state) S = C.upgradeState(state, { scoped: Boolean(state._scoped) });
+    toastedNotifIds = loadToastedIds(u.id);
+    if (state) {
+      S = C.upgradeState(state, { scoped: Boolean(state._scoped) });
+      hydrateToasted(S);
+      saveToastedIds(u.id);
+    }
     if (rev) ui.rev = rev;
     localStorage.setItem(UKEY, u.id);
     localStorage.setItem(AKEY, '1');
@@ -136,13 +182,27 @@
     ui.autenticado = false;
     ui.token = '';
     ui.userId = '';
+    ui.rev = 0;
     ui.bell = false;
     ui.modal = null;
+    ui.showPasswords = false;
+    ui.userRoleFilter = '';
+    ui.userBranchFilter = '';
+    ui.userSearch = '';
+    ui.proFilter = '';
+    ui.proSearch = '';
+    ui.tab = isDbManagerUrl() ? { adm: 'bd' } : {};
+    ui.f = { sucursal: '', estado: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' };
+    ui.csv = { filas: [], clasif: null, tab: 'validos', rawText: '' };
     ui.db.stats = null;
     ui.db.tableData = null;
     ui.db.sqlResult = null;
     knownNotifIds = new Set();
     knownProspects = new Map();
+    toastedNotifIds = new Set();
+    lastDupAlertKey = '';
+    const toastBox = $('#toasts');
+    if (toastBox) toastBox.innerHTML = '';
     localStorage.removeItem(AKEY);
     localStorage.removeItem(TKEY);
     localStorage.removeItem(UKEY);
@@ -175,21 +235,30 @@
       if (res.ok) {
         const d = await res.json();
         ui.db.tursoConnected = Boolean(d && d.tursoConnected);
-        if (!ui.autenticado) render();
+        if (!ui.autenticado) {
+          const pill = $('.db-pill-bar .badge');
+          if (pill) {
+            pill.className = 'badge ' + (ui.db.tursoConnected ? 'b-green' : 'b-amber');
+            pill.textContent = ui.db.tursoConnected ? '🟢 Base de Datos Turso Cloud SQLite Conectada' : '🟡 Base de Datos Sincronizada';
+          }
+          const dot = $('.cloud-dot');
+          if (dot) dot.textContent = ui.db.tursoConnected ? '🟢' : '🟡';
+        }
       }
     } catch {}
   }
 
   async function pullFromCloud(forceRender, isPoll) {
-    if (!isHttp() || !ui.autenticado || !ui.token) return;
-    if (isPoll && Date.now() - lastPollTs < 2000) return;
+    if (!isHttp() || !ui.autenticado || !ui.token) return false;
+    if (isPoll && Date.now() - lastPollTs < 2000) return false;
     lastPollTs = Date.now();
     try {
       const { res, data } = await apiFetch('/api/state', { method: 'GET' });
-      if (!res.ok || !data || !data.ok || !data.state) return;
+      if (!res.ok || !data || !data.ok || !data.state) return false;
 
       const uPrev = me() || data.usuario;
       const incoming = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
+      hydrateToasted(incoming);
       const prevRev = ui.rev;
       ui.rev = data.rev || ui.rev;
       ui.db.tursoConnected = Boolean(data.source && data.source.startsWith('turso'));
@@ -197,13 +266,16 @@
 
       // Detect cross-device real-time notifications & queue arrivals
       if (isPoll && prevRev > 0 && uPrev) {
-        const newNotifs = (incoming.notificaciones || []).filter((n) => n.userId === uPrev.id && !n.leida && !knownNotifIds.has(n.id));
+        const newNotifs = (incoming.notificaciones || []).filter((n) => n.userId === uPrev.id && !n.leida && !knownNotifIds.has(n.id) && !toastedNotifIds.has(n.id));
         if (newNotifs.length) {
           newNotifs.slice(-2).forEach((n) => {
             n.toasted = true;
+            toastedNotifIds.add(n.id);
             toast('🔔 ' + n.texto, 'notif');
             SND.playForNotification(uPrev.rol, n.texto);
           });
+          newNotifs.forEach((n) => { n.toasted = true; toastedNotifIds.add(n.id); });
+          saveToastedIds(uPrev.id);
         } else if (uPrev.rol === 'callcenter') {
           const nuevos = (incoming.prospectos || []).filter((p) => p.estado === 'nuevo' && !knownProspects.has(p.id));
           if (nuevos.length) {
@@ -230,12 +302,15 @@
       snapshotKnown(S);
       saveLocal();
 
-      if (forceRender || (!isUserTyping() && prevRev !== ui.rev)) {
+      if (forceRender || (!isFormProtected() && prevRev !== ui.rev)) {
         render();
       } else {
         updateBellBadgeOnly();
       }
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function updateBellBadgeOnly() {
@@ -292,6 +367,7 @@
       }
       if (data.state) {
         S = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
+        hydrateToasted(S);
         ui.rev = data.rev || ui.rev;
         ui.db.tursoConnected = Boolean(data.tursoSynced);
         ui.db.lastSync = new Date().toLocaleTimeString('es-NI');
@@ -452,13 +528,19 @@
     const u = me();
     if (!u) return;
     let changed = false;
-    (S.notificaciones || []).filter((n) => n.userId === u.id && !n.toasted).slice(-2).forEach((n) => {
+    const pending = (S.notificaciones || []).filter((n) => n.userId === u.id && !n.toasted && !toastedNotifIds.has(n.id));
+    pending.slice(-2).forEach((n) => {
       n.toasted = true;
+      toastedNotifIds.add(n.id);
       changed = true;
       toast('🔔 ' + n.texto, 'notif');
       SND.playForNotification(u.rol, n.texto);
     });
-    if (changed) saveLocal();
+    pending.forEach((n) => { n.toasted = true; toastedNotifIds.add(n.id); });
+    if (changed) {
+      saveToastedIds(u.id);
+      saveLocal();
+    }
   }
 
   // ---------- UI components ----------
@@ -583,7 +665,7 @@
           <div class="kanban-cards">
             ${items.length ? items.map((p) => {
               const monto = (p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto || 0;
-              return `<div class="kanban-card" data-action="ver" data-id="${p.id}">
+              return `<div class="kanban-card" tabindex="0" role="button" data-action="ver" data-id="${p.id}">
                 <div class="kanban-card-top">
                   <h4>${h(p.nombre)}</h4>
                   ${badgeSLA(p)}
@@ -809,8 +891,8 @@
           <label>Tipo de Crédito *<select name="tipoCredito">${tcs.map((t) => `<option value="${h(t)}">${h(t)}</option>`).join('')}</select></label>
         </div>
         <div class="cols two">
-          <label><span class="field-head"><span>Teléfono / WhatsApp *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="9" placeholder="8888-8888" data-dup data-fmt="tel"></label>
-          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="9" placeholder="7777-7777" data-fmt="tel"></label>
+          <label><span class="field-head"><span>Teléfono / WhatsApp *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="16" placeholder="8888-8888" data-dup data-fmt="tel"></label>
+          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="16" placeholder="7777-7777" data-fmt="tel"></label>
         </div>
         <div class="cols two">
           <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
@@ -881,10 +963,10 @@
         </div>
         <div class="cols two">
           <label>Nombre Completo del Cliente *<input name="nombre" required minlength="3" placeholder="Ej: Juan Carlos Pérez Gómez"></label>
-          <label><span class="field-head"><span>Teléfono de Contacto *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="9" placeholder="8888-9999" data-dup data-fmt="tel"></label>
+          <label><span class="field-head"><span>Teléfono de Contacto *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="16" placeholder="8888-9999" data-dup data-fmt="tel"></label>
         </div>
         <div class="cols two">
-          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="9" placeholder="7777-1111" data-fmt="tel"></label>
+          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="16" placeholder="7777-1111" data-fmt="tel"></label>
           <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
         </div>
         <div id="dup-alert" class="alert" hidden></div>
@@ -1080,7 +1162,7 @@
             <div style="padding:6px 10px"><small>✅ Consulta ejecutada en ${sqlRes.latencyMs || 1} ms (${(sqlRes.rows || []).length} filas)</small></div>
             <table class="table">
               <thead><tr>${(sqlRes.columns || []).map((c) => `<th>${h(c)}</th>`).join('')}</tr></thead>
-              <tbody>${(sqlRes.rows || []).map((r) => `<tr>${(sqlRes.columns || []).map((c) => `<td>${h(r[c])}</td>`).join('')}</tr>`).join('') || '<tr><td>Sin filas</td></tr>'}</tbody>
+              <tbody>${(sqlRes.rows || []).map((r) => `<tr>${(sqlRes.columns || []).map((c) => `<td>${h(r[c])}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${(sqlRes.columns || []).length || 1}">Sin filas</td></tr>`}</tbody>
             </table>
           </div>
         ` : `<div class="alert" style="margin-top:10px">⚠️ ${h(sqlRes.error)}</div>`) : ''}
@@ -1721,17 +1803,18 @@
       case 'csv-importar': {
         if (!ui.csv.filas.length) break;
         el.disabled = true;
-        await mutate(
+        const r = await mutate(
           'importarFilasCSV',
           { filas: ui.csv.filas, opts: { recuperarEspeciales: true } },
           () => C.importarFilasCSV(S, u, ui.csv.filas, { recuperarEspeciales: true }),
-          (r) => `✅ Se importaron ${(r.importados || []).length} prospectos válidos con Candado de Origen.`,
+          (res) => `✅ Se importaron ${(res.importados || []).length} prospectos válidos con Candado de Origen.`,
           {
-            onSuccess: (r) => {
-              ui.csv.clasif = (r && r.clasificacion) || C.clasificarFilasCSV(S, ui.csv.filas, { promotorDefault: u.rol === 'promotor' ? u : null, sucursal: u.rol === 'promotor' ? u.sucursal : '', recuperarEspeciales: true });
+            onSuccess: (res) => {
+              ui.csv.clasif = (res && res.clasificacion) || C.clasificarFilasCSV(S, ui.csv.filas, { promotorDefault: u.rol === 'promotor' ? u : null, sucursal: u.rol === 'promotor' ? u.sucursal : '', recuperarEspeciales: true });
             },
           }
         );
+        if (!r.ok) el.disabled = false;
         break;
       }
       case 'csv-exportar-tab': {
@@ -1744,10 +1827,15 @@
       }
       case 'db-sync-now': {
         toast('Sincronizando con Turso Cloud SQLite…', 'info');
-        await pullFromCloud(true, false);
-        await fetchDbStats();
-        SND.play('admin_ok');
-        toast('Base de datos sincronizada con Turso Cloud SQLite.', 'ok');
+        const okSync = await pullFromCloud(true, false);
+        if (okSync) {
+          await fetchDbStats();
+          SND.play('admin_ok');
+          toast('Base de datos sincronizada con Turso Cloud SQLite.', 'ok');
+        } else {
+          SND.play('admin_warn');
+          toast('No se pudo sincronizar con Turso Cloud SQLite.', 'error');
+        }
         break;
       }
       case 'db-ver-tabla':
@@ -2168,6 +2256,11 @@
       ui.modal = null;
       ui.bell = false;
       render();
+      return;
+    }
+    if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches('.kanban-card[data-action="ver"]')) {
+      e.preventDefault();
+      e.target.click();
     }
   });
 
@@ -2177,9 +2270,12 @@
     try {
       const parsed = JSON.parse(e.newValue);
       S = C.upgradeState(parsed, { scoped: Boolean(parsed._scoped) });
+      hydrateToasted(S);
     } catch { return; }
-    if (isUserTyping()) toastPendientes();
-    else render();
+    if (isFormProtected()) {
+      updateBellBadgeOnly();
+      toastPendientes();
+    } else render();
   });
 
   // True Cross-Device Real-Time Sync: lightweight polling every 12s when visible + instant sync on focus/visibility

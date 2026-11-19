@@ -67,11 +67,17 @@ test('GET /api/health returns only safe metadata; unauthenticated /api/state ret
     const html = await r.text();
     assert.ok(html.includes('AlfaTrack'));
   }
-  // Private credential files must not be served over HTTP
-  const forbiddenTxt = await fetch(baseUrl + '/CREDENCIALES_ALFATRACK.txt');
-  assert.strictEqual(forbiddenTxt.status, 403);
-  const forbiddenMd = await fetch(baseUrl + '/CREDENCIALES_USUARIOS.md');
-  assert.strictEqual(forbiddenMd.status, 403);
+  // Private credential files and backend source files must not be served over HTTP
+  for (const blocked of ['/CREDENCIALES_ALFATRACK.txt', '/CREDENCIALES_USUARIOS.md', '/db.js', '/server.js', '/package.json', '/.env.local']) {
+    const r = await fetch(baseUrl + blocked);
+    assert.strictEqual(r.status, 403, `expected 403 for ${blocked}, got ${r.status}`);
+  }
+  // Malformed URL encoding returns 400 and never crashes server
+  const badUrl = await fetch(baseUrl + '/%E0%A4%A');
+  assert.strictEqual(badUrl.status, 400);
+  // Malformed cookie header returns 401 and never crashes API with 500
+  const badCookie = await api('/api/state', { headers: { Cookie: 'corrupt=%E0%A4%A' } });
+  assert.strictEqual(badCookie.status, 401);
 });
 
 test('POST /api/auth/login signs HMAC-SHA256 tokens and scopes state strictly by role', async () => {
