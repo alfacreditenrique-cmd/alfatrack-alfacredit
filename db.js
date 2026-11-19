@@ -28,10 +28,6 @@ const Core = require('./core.js');
   } catch {}
 })();
 
-// shortcut: fallback Turso credentials retained until TURSO_URL/TURSO_AUTH_TOKEN are confirmed set in Vercel project env vars
-const FALLBACK_TURSO_URL = 'https://baseinventario-alfacreditenrique-cmd.aws-us-east-2.turso.io';
-const FALLBACK_TURSO_TOKEN = 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NzYyNjgxODgsImlkIjoiMDE5ZDkxZDMtYTcwMS03ZDYzLWFiM2MtMGFmMjQ4YzI2ZWU4IiwicmlkIjoiZWIxOGNlOTItNjRiOS00OTRjLTgzZWYtMTM0Mzk5ZmExZTBmIn0.Zh4suZn4iXch7sJi_b4W34pPGzd16U9DJwcp_cfbnkH5IWf0gy7LZIeIcw1nyHw6RMoHQQ_MxEZMm9leLMq9CQ';
-
 const ALLOWED_TABLES = [
   'alfatrack_usuarios',
   'alfatrack_prospectos',
@@ -45,8 +41,8 @@ const ALLOWED_TABLES = [
 function getTursoConfig() {
   const mode = process.env.ALFATRACK_DB_MODE || 'turso';
   if (mode === 'local') return { enabled: false, url: '', token: '' };
-  const rawUrl = (process.env.TURSO_URL || FALLBACK_TURSO_URL).trim().replace(/^libsql:\/\//i, 'https://').replace(/\/+$/, '');
-  const token = (process.env.TURSO_AUTH_TOKEN || FALLBACK_TURSO_TOKEN).trim();
+  const rawUrl = (process.env.TURSO_URL || '').trim().replace(/^libsql:\/\//i, 'https://').replace(/\/+$/, '');
+  const token = (process.env.TURSO_AUTH_TOKEN || '').trim();
   return { enabled: Boolean(rawUrl && token), url: rawUrl, token };
 }
 
