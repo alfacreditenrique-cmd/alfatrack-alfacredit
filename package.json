@@ -2,7 +2,6 @@
   "name": "alfatrack-alfacredit",
   "version": "2.0.0",
   "description": "AlfaTrack - Control y Seguimiento de Prospectos, Gestión de Credenciales y Base de Datos en la Nube (AlfaCredit S.A.)",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/core.test.js test/api.test.js",

@@ -4,6 +4,8 @@ storage
 .git
 test
 graphify-out
+dist
+server.js
 CREDENCIALES_ALFATRACK.txt
 CREDENCIALES_USUARIOS.md
 README.md

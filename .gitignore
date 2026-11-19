@@ -1,5 +1,6 @@
 scripts/shots/
 node_modules/
+dist/
 .vercel
 .env*
 storage/

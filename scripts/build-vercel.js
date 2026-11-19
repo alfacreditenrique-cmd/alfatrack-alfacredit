@@ -1,19 +1,13 @@
-/* Generates Vercel Build Output API v3 (.vercel/output) so `vercel deploy --prebuilt` works on Windows without symlink privileges. */
+/* Copies ONLY safe public PWA assets into dist/ for Vercel Git builds (and optionally .vercel/output when --prebuilt is passed). */
 'use strict';
 
 const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
-const OUT = path.join(ROOT, '.vercel', 'output');
-const STATIC_DIR = path.join(OUT, 'static');
-const FUNC_DIR = path.join(OUT, 'functions', 'api', 'index.func');
+const DIST_DIR = path.join(ROOT, 'dist');
+const PREBUILT = process.argv.includes('--prebuilt');
 
-fs.rmSync(OUT, { recursive: true, force: true });
-fs.mkdirSync(STATIC_DIR, { recursive: true });
-fs.mkdirSync(FUNC_DIR, { recursive: true });
-
-// 1. Copy static PWA files (never copy private credential files to public static dir)
 const staticFiles = [
   'index.html',
   'styles.css',
@@ -25,11 +19,27 @@ const staticFiles = [
   'sw.js',
 ];
 
+fs.rmSync(DIST_DIR, { recursive: true, force: true });
+fs.mkdirSync(DIST_DIR, { recursive: true });
 for (const file of staticFiles) {
   const src = path.join(ROOT, file);
-  if (fs.existsSync(src)) {
-    fs.copyFileSync(src, path.join(STATIC_DIR, file));
-  }
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(DIST_DIR, file));
+}
+console.log(`Built ${staticFiles.length} public PWA assets into dist/`);
+
+if (!PREBUILT) process.exit(0);
+
+const OUT = path.join(ROOT, '.vercel', 'output');
+const STATIC_DIR = path.join(OUT, 'static');
+const FUNC_DIR = path.join(OUT, 'functions', 'api', 'index.func');
+
+fs.rmSync(OUT, { recursive: true, force: true });
+fs.mkdirSync(STATIC_DIR, { recursive: true });
+fs.mkdirSync(FUNC_DIR, { recursive: true });
+
+for (const file of staticFiles) {
+  const src = path.join(ROOT, file);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(STATIC_DIR, file));
 }
 
 // 2. Copy serverless function files into api/index.func
