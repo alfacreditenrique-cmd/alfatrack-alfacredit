@@ -1,26 +1,54 @@
-/* AlfaTrack UI — PWA + Real Auth + Promoter Forms & CSV Depurador + Turso Cloud SQLite Database Manager */
+/* AlfaTrack UI — Vanguardist PWA + Signed Auth + Atomic Mutations + Real-Time Sync + Kanban/Drawer + Role Sound */
 (function () {
   'use strict';
   const C = window.Core;
+  const SND = window.Sound || { isMuted: () => true, toggleMute: () => true, play: () => {}, playForNotification: () => {}, playForAction: () => {}, CUES: {}, ROLE_CUES: {} };
   const KEY = 'alfatrack_v1';
   const UKEY = 'alfatrack_user';
   const AKEY = 'alfatrack_auth';
   const TKEY = 'alfatrack_token';
+  const THEME_KEY = 'alfatrack_theme';
+  const VIEW_KEY = 'alfatrack_view';
   const $ = (sel) => document.querySelector(sel);
   const h = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => 'C$ ' + Number(n || 0).toLocaleString('es-NI');
   const fecha = (iso) => (iso ? new Date(iso).toLocaleString('es-NI', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
   const fechaCorta = (iso) => (iso ? new Date(iso).toLocaleDateString('es-NI', { day: '2-digit', month: 'short' }) : '—');
-  const telFmt = (t) => String(t || '').replace(/^(\d{4})(\d{4})$/, '$1-$2');
-
-  let localEpoch = 0;
-  let syncQueue = Promise.resolve();
-  let S = load();
+  const telFmt = (t) => {
+    const d = C.soloDigitos(t).slice(0, 8);
+    return d.length > 4 ? `${d.slice(0, 4)}-${d.slice(4)}` : d;
+  };
+  const cedFmt = (c) => {
+    const raw = C.normCedula(c).slice(0, 14);
+    if (raw.length <= 3) return raw;
+    if (raw.length <= 9) return `${raw.slice(0, 3)}-${raw.slice(3)}`;
+    return `${raw.slice(0, 3)}-${raw.slice(3, 9)}-${raw.slice(9)}`;
+  };
+  const iniciales = (nombre) => {
+    const pts = String(nombre || '').trim().split(/\s+/).filter(Boolean);
+    return ((pts[0]?.[0] || '') + (pts[1]?.[0] || pts[0]?.[1] || '')).toUpperCase() || 'AT';
+  };
+  const isHttp = () => location.protocol.startsWith('http');
   const isDbManagerUrl = () => /^\/(?:turso|db|gestor-db\.html)$/i.test(location.pathname || '') || /(?:^|[?&])(?:tab|view)=(?:bd|turso|db)\b/i.test(location.search || '') || /^#(?:turso|bd|db)$/i.test(location.hash || '');
+
+  let S = load();
+  let knownNotifIds = new Set();
+  let knownProspects = new Map();
+  let lastPollTs = 0;
+  let dupCheckSeq = 0;
+  let lastDupAlertKey = '';
+
+  const savedView = localStorage.getItem(VIEW_KEY);
+  const defaultView = () => (window.innerWidth >= 1024 ? 'tabla' : 'tarjetas');
+
   const ui = {
-    userId: localStorage.getItem(UKEY),
-    autenticado: Boolean(localStorage.getItem(AKEY)),
+    userId: localStorage.getItem(UKEY) || '',
+    autenticado: Boolean(localStorage.getItem(AKEY) && localStorage.getItem(TKEY)),
     token: localStorage.getItem(TKEY) || '',
+    theme: localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light',
+    viewMode: savedView && ['tabla', 'tarjetas', 'kanban'].includes(savedView) ? savedView : defaultView(),
+    rev: 0,
+    busy: false,
     showPasswords: false,
     userRoleFilter: '',
     userBranchFilter: '',
@@ -41,124 +69,260 @@
       tursoConnected: true,
     },
     bell: false,
-    modal: null, // {type, id}
+    modal: null, // {type, id, pre}
   };
 
-  function upgradeLocalState(s) {
-    const base = C.seed();
-    s.version = 1;
-    s.config = Object.assign({}, base.config, s.config || {});
-    s.config.emailsGerentes = Object.assign({}, base.config.emailsGerentes, (s.config && s.config.emailsGerentes) || {});
-    if (!Array.isArray(s.config.tiposCredito) || !s.config.tiposCredito.length) s.config.tiposCredito = base.config.tiposCredito;
-    if (!Array.isArray(s.config.plataformas) || !s.config.plataformas.length) s.config.plataformas = base.config.plataformas;
-    s.usuarios = Array.isArray(s.usuarios) ? s.usuarios : [];
-    const byId = new Map(s.usuarios.map((u) => [u.id, u]));
-    const used = new Set(s.usuarios.map((u) => (u.username || '').toLowerCase()).filter(Boolean));
-    const OFFICIAL_IDS = new Set([
-      'u-pro-managua', 'u-pro-mga-lester', 'u-pro-mga-claudia', 'u-pro-mga-marjorie',
-      'u-pro-mas-fanny', 'u-pro-mas-noelia', 'u-pro-mas-yeiling',
-      'u-pro-jin-nidia', 'u-pro-jui-martha',
-      'u-pro-seb-evelia', 'u-pro-seb-jiurem',
-      'u-pro-leo-araceli', 'u-pro-leo-lorena',
-    ]);
-    const needsOfficialMigration = !s.officialPromotersV2;
-    s.usuarios.forEach((u) => {
-      const bm = base.usuarios.find((x) => x.id === u.id);
-      if (needsOfficialMigration && bm && OFFICIAL_IDS.has(u.id)) {
-        used.delete((u.username || '').toLowerCase());
-        u.nombre = bm.nombre;
-        u.sucursal = bm.sucursal;
-        u.username = bm.username;
-        used.add(u.username);
-      }
-      if (!u.username) {
-        u.username = (bm && !used.has(bm.username)) ? bm.username : C.genUsername(u.nombre, used);
-        used.add(u.username);
-      }
-      if (!u.password) u.password = (bm && bm.password) || (u.id === 'u-admin' ? 'admin123' : C.genPassword(u.username));
-      if (!u.passwordHash) u.passwordHash = C.hashPwd(u.password);
-      if (u.email === undefined && bm) u.email = bm.email || '';
-    });
-    base.usuarios.forEach((bu) => {
-      if (!byId.has(bu.id) && !used.has(bu.username)) {
-        s.usuarios.push(JSON.parse(JSON.stringify(bu)));
-        byId.set(bu.id, bu);
-        used.add(bu.username);
-      }
-    });
-    if (needsOfficialMigration && Array.isArray(s.prospectos)) {
-      s.prospectos.forEach((p) => {
-        const uOrig = byId.get(p.promotor_origen_id);
-        if (uOrig && OFFICIAL_IDS.has(uOrig.id)) p.promotor_nombre = uOrig.nombre;
-      });
-    }
-    s.officialPromotersV2 = true;
-    return s;
+  function applyTheme(t) {
+    ui.theme = t === 'dark' ? 'dark' : 'light';
+    if (ui.theme === 'dark') document.documentElement.dataset.theme = 'dark';
+    else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem(THEME_KEY, ui.theme); } catch {}
   }
+  applyTheme(ui.theme);
 
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
       if (raw) {
         const s = JSON.parse(raw);
-        if (s && s.version === 1) return upgradeLocalState(s);
+        if (s && s.version === 1) return C.upgradeState(s, { scoped: Boolean(s._scoped) });
       }
-    } catch (e) { /* corrupted storage: fall back to seed */ }
-    const s = C.seed();
-    localStorage.setItem(KEY, JSON.stringify(s));
-    return s;
+    } catch {}
+    if (!isHttp()) {
+      const s = C.seed();
+      try { localStorage.setItem(KEY, JSON.stringify(s)); } catch {}
+      return s;
+    }
+    return { version: 1, officialPromotersV2: true, _scoped: true, config: C.defaultConfig(), usuarios: [], prospectos: [], notificaciones: [], auditoria: [] };
   }
 
-  const saveLocal = () => localStorage.setItem(KEY, JSON.stringify(S));
+  const saveLocal = () => {
+    try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {}
+  };
 
-  async function syncToCloud() {
-    if (!location.protocol.startsWith('http')) return;
-    const snapshot = JSON.parse(JSON.stringify(S));
-    syncQueue = syncQueue.then(async () => {
-      ui.db.syncing = true;
-      try {
-        const res = await fetch('/api/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ state: snapshot }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          ui.db.tursoConnected = Boolean(data.tursoSynced);
-          ui.db.lastSync = new Date().toLocaleTimeString('es-NI');
-        }
-      } catch {} finally {
-        ui.db.syncing = false;
-      }
-    });
-    return syncQueue;
+  function snapshotKnown(state) {
+    knownNotifIds = new Set((state.notificaciones || []).map((n) => n.id));
+    knownProspects = new Map((state.prospectos || []).map((p) => [p.id, p.estado]));
+  }
+  if (ui.autenticado) snapshotKnown(S);
+
+  const user = (id) => (S.usuarios || []).find((u) => u.id === id);
+  const pro = (id) => (S.prospectos || []).find((p) => p.id === id);
+  const me = () => user(ui.userId);
+  const est = (e) => (S.config && S.config.estados && S.config.estados[e]) || e;
+
+  function isUserTyping() {
+    const a = document.activeElement;
+    return Boolean(a && a.closest('form[data-form="nuevo"], form[data-form="captura-cc"], form[data-form="config"], form[data-form="db-sql"], .modal form, [data-input="csv-text"]'));
   }
 
-  async function pullFromCloud(forceRender) {
-    if (!location.protocol.startsWith('http')) return;
-    const epochAtStart = localEpoch;
+  function setAuthenticatedSession(u, token, state, rev) {
+    ui.userId = u.id;
+    ui.autenticado = true;
+    ui.token = token || ('at_local_' + u.id);
+    if (state) S = C.upgradeState(state, { scoped: Boolean(state._scoped) });
+    if (rev) ui.rev = rev;
+    localStorage.setItem(UKEY, u.id);
+    localStorage.setItem(AKEY, '1');
+    localStorage.setItem(TKEY, ui.token);
+    saveLocal();
+    snapshotKnown(S);
+  }
+
+  function logoutSession(silent) {
+    if (isHttp() && ui.token) {
+      fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + ui.token } }).catch(() => {});
+    }
+    ui.autenticado = false;
+    ui.token = '';
+    ui.userId = '';
+    ui.bell = false;
+    ui.modal = null;
+    ui.db.stats = null;
+    ui.db.tableData = null;
+    ui.db.sqlResult = null;
+    knownNotifIds = new Set();
+    knownProspects = new Map();
+    localStorage.removeItem(AKEY);
+    localStorage.removeItem(TKEY);
+    localStorage.removeItem(UKEY);
+    if (isHttp()) {
+      localStorage.removeItem(KEY);
+      S = { version: 1, officialPromotersV2: true, _scoped: true, config: C.defaultConfig(), usuarios: [], prospectos: [], notificaciones: [], auditoria: [] };
+    }
+    render();
+    if (!silent) toast('Sesión cerrada correctamente.', 'info');
+  }
+
+  async function apiFetch(url, opts) {
+    opts = opts || {};
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    if (ui.token) headers.Authorization = 'Bearer ' + ui.token;
+    const res = await fetch(url, Object.assign({}, opts, { headers }));
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (res.status === 401 && ui.autenticado && !url.includes('/api/auth/login')) {
+      logoutSession(true);
+      toast('Tu sesión expiró. Inicia sesión nuevamente.', 'error');
+    }
+    return { res, data: data || { ok: false, error: `Error HTTP ${res.status}` } };
+  }
+
+  async function checkHealth() {
+    if (!isHttp()) return;
     try {
-      const res = await fetch('/api/state');
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data && data.ok && data.state && epochAtStart === localEpoch) {
-        S = upgradeLocalState(data.state);
-        saveLocal();
-        ui.db.tursoConnected = data.source && data.source.startsWith('turso');
-        ui.db.lastSync = new Date().toLocaleTimeString('es-NI');
-        const typing = document.activeElement && document.activeElement.closest('form, input, select, textarea, .modal');
-        if (forceRender || !typing) render();
+      const res = await fetch('/api/health');
+      if (res.ok) {
+        const d = await res.json();
+        ui.db.tursoConnected = Boolean(d && d.tursoConnected);
+        if (!ui.autenticado) render();
       }
     } catch {}
   }
 
-  async function fetchDbStats() {
-    if (!location.protocol.startsWith('http')) return;
+  async function pullFromCloud(forceRender, isPoll) {
+    if (!isHttp() || !ui.autenticado || !ui.token) return;
+    if (isPoll && Date.now() - lastPollTs < 2000) return;
+    lastPollTs = Date.now();
     try {
-      const res = await fetch('/api/db/stats');
-      if (res.ok) {
-        ui.db.stats = await res.json();
-        ui.db.tursoConnected = Boolean(ui.db.stats.tursoConnected);
+      const { res, data } = await apiFetch('/api/state', { method: 'GET' });
+      if (!res.ok || !data || !data.ok || !data.state) return;
+
+      const uPrev = me() || data.usuario;
+      const incoming = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
+      const prevRev = ui.rev;
+      ui.rev = data.rev || ui.rev;
+      ui.db.tursoConnected = Boolean(data.source && data.source.startsWith('turso'));
+      ui.db.lastSync = new Date().toLocaleTimeString('es-NI');
+
+      // Detect cross-device real-time notifications & queue arrivals
+      if (isPoll && prevRev > 0 && uPrev) {
+        const newNotifs = (incoming.notificaciones || []).filter((n) => n.userId === uPrev.id && !n.leida && !knownNotifIds.has(n.id));
+        if (newNotifs.length) {
+          newNotifs.slice(-2).forEach((n) => {
+            n.toasted = true;
+            toast('🔔 ' + n.texto, 'notif');
+            SND.playForNotification(uPrev.rol, n.texto);
+          });
+        } else if (uPrev.rol === 'callcenter') {
+          const nuevos = (incoming.prospectos || []).filter((p) => p.estado === 'nuevo' && !knownProspects.has(p.id));
+          if (nuevos.length) {
+            toast(`📞 Nuevo prospecto en cola: ${nuevos[0].nombre} (${nuevos[0].sucursal})`, 'notif');
+            SND.play('new_queue');
+          }
+        } else if (uPrev.rol === 'gerente') {
+          const pescados = (incoming.prospectos || []).filter((p) => p.estado === 'pescado' && knownProspects.get(p.id) !== 'pescado');
+          if (pescados.length) {
+            toast(`🏢 Nuevo cliente pescado en ${uPrev.sucursal}: ${pescados[0].nombre}`, 'notif');
+            SND.play('pescado_branch');
+          }
+        } else if (uPrev.rol === 'gestor') {
+          const asignados = (incoming.prospectos || []).filter((p) => p.estado === 'seguimiento' && knownProspects.get(p.id) !== 'seguimiento');
+          if (asignados.length) {
+            toast(`📋 Caso asignado para evaluación: ${asignados[0].nombre}`, 'notif');
+            SND.play('assigned_support');
+          }
+        }
+      }
+
+      S = incoming;
+      if (data.usuario) ui.userId = data.usuario.id;
+      snapshotKnown(S);
+      saveLocal();
+
+      if (forceRender || (!isUserTyping() && prevRev !== ui.rev)) {
+        render();
+      } else {
+        updateBellBadgeOnly();
+      }
+    } catch {}
+  }
+
+  function updateBellBadgeOnly() {
+    const u = me();
+    if (!u) return;
+    const sinLeer = (S.notificaciones || []).filter((n) => n.userId === u.id && !n.leida).length;
+    const bell = $('.bell');
+    if (bell) {
+      let badge = bell.querySelector('.count');
+      if (sinLeer > 0) {
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.className = 'count';
+          bell.appendChild(badge);
+        }
+        badge.textContent = sinLeer > 99 ? '99+' : String(sinLeer);
+      } else if (badge) {
+        badge.remove();
+      }
+    }
+  }
+
+  async function mutate(action, payload, localFallbackFn, okMsg, opts) {
+    opts = opts || {};
+    const u = me();
+    const rol = u ? u.rol : 'promotor';
+    if (!isHttp()) {
+      const r = localFallbackFn();
+      if (!r || !r.ok) {
+        toast((r && r.error) || 'Error en la operación.', 'error');
+        SND.playForAction(rol, action, false);
+        return { ok: false, error: r && r.error };
+      }
+      saveLocal();
+      snapshotKnown(S);
+      if (opts.onSuccess) opts.onSuccess(r);
+      if (okMsg) toast(typeof okMsg === 'function' ? okMsg(r) : okMsg, 'ok');
+      SND.play(opts.soundCue || (action === 'crearProspecto' ? 'prospect_created' : 'call_saved'));
+      render();
+      return { ok: true, result: r };
+    }
+
+    ui.busy = true;
+    try {
+      const { res, data } = await apiFetch('/api/mutate', {
+        method: 'POST',
+        body: JSON.stringify({ action, payload }),
+      });
+      if (!res.ok || !data || !data.ok) {
+        const msg = (data && data.error) || 'Error al guardar en el servidor.';
+        toast(msg, 'error');
+        SND.playForAction(rol, action, false);
+        return { ok: false, error: msg, result: data && data.result };
+      }
+      if (data.state) {
+        S = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
+        ui.rev = data.rev || ui.rev;
+        ui.db.tursoConnected = Boolean(data.tursoSynced);
+        ui.db.lastSync = new Date().toLocaleTimeString('es-NI');
+        saveLocal();
+        snapshotKnown(S);
+      }
+      if (opts.onSuccess) opts.onSuccess(data.result);
+      if (okMsg) {
+        const finalMsg = typeof okMsg === 'function' ? okMsg(data.result) : okMsg;
+        if (finalMsg) toast(finalMsg, 'ok');
+      }
+      if (opts.soundCue) SND.play(opts.soundCue);
+      else SND.playForAction(rol, action, true);
+      render();
+      return { ok: true, result: data.result };
+    } catch {
+      toast('Error de conexión con el servidor.', 'error');
+      SND.playForAction(rol, action, false);
+      return { ok: false, error: 'Error de conexión.' };
+    } finally {
+      ui.busy = false;
+    }
+  }
+
+  async function fetchDbStats() {
+    if (!isHttp() || !ui.autenticado) return;
+    try {
+      const { res, data } = await apiFetch('/api/db/stats', { method: 'GET' });
+      if (res.ok && data && data.ok) {
+        ui.db.stats = data;
+        ui.db.tursoConnected = Boolean(data.tursoConnected);
         render();
       }
     } catch {}
@@ -166,17 +330,19 @@
 
   async function fetchDbTable(name) {
     ui.db.activeTable = name;
-    if (location.protocol.startsWith('http')) {
+    if (isHttp()) {
       try {
-        const res = await fetch('/api/db/table?name=' + encodeURIComponent(name) + '&limit=200&actorId=' + encodeURIComponent(ui.userId || ''));
-        if (res.ok) {
-          ui.db.tableData = await res.json();
+        const { res, data } = await apiFetch('/api/db/table?name=' + encodeURIComponent(name) + '&limit=200', { method: 'GET' });
+        if (res.ok && data && data.ok) {
+          ui.db.tableData = data;
           render();
           return;
         }
+        toast((data && data.error) || 'No se pudo cargar la tabla SQL.', 'error');
+        SND.play('admin_warn');
+        return;
       } catch {}
     }
-    // Local fallback table projection
     const rows = name === 'alfatrack_usuarios'
       ? S.usuarios.map((u) => ({ id: u.id, username: u.username, password: u.password, nombre: u.nombre, rol: u.rol, sucursal: u.sucursal, email: u.email || '', activo: u.activo ? 1 : 0 }))
       : name === 'alfatrack_prospectos'
@@ -188,51 +354,18 @@
     render();
   }
 
-  const save = () => {
-    localEpoch++;
-    saveLocal();
-    syncToCloud();
-  };
-
-  const user = (id) => S.usuarios.find((u) => u.id === id);
-  const pro = (id) => S.prospectos.find((p) => p.id === id);
-  const me = () => user(ui.userId);
-  const est = (e) => S.config.estados[e] || e;
-
-  function ensureUser() {
-    const u = me();
-    if (!u || !u.activo) {
-      ui.userId = (S.usuarios.find((x) => x.rol === 'promotor' && x.activo) || S.usuarios.find((x) => x.activo)).id;
+  function setFormBusy(form, busy, label) {
+    if (!form) return;
+    const btn = form.querySelector('button[type="submit"], button:not([type])');
+    if (!btn) return;
+    if (busy) {
+      if (!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spin"></span> ${h(label || 'Guardando…')}`;
+    } else {
+      btn.disabled = false;
+      if (btn.dataset.origHtml) btn.innerHTML = btn.dataset.origHtml;
     }
-    localStorage.setItem(UKEY, ui.userId);
-  }
-
-  function setAuthenticatedSession(u, token) {
-    ui.userId = u.id;
-    ui.autenticado = true;
-    ui.token = token || ('at_local_' + u.id);
-    localStorage.setItem(UKEY, u.id);
-    localStorage.setItem(AKEY, '1');
-    localStorage.setItem(TKEY, ui.token);
-  }
-
-  function logoutSession() {
-    ui.autenticado = false;
-    ui.token = '';
-    ui.bell = false;
-    ui.modal = null;
-    localStorage.removeItem(AKEY);
-    localStorage.removeItem(TKEY);
-    render();
-  }
-
-  // Apply a core mutation; persist + rerender on success, toast on error.
-  function commit(res, okMsg) {
-    if (!res.ok) { toast(res.error, 'error'); return false; }
-    save();
-    if (okMsg) toast(okMsg, 'ok');
-    render();
-    return true;
   }
 
   // ---------- CSV helpers ----------
@@ -293,27 +426,42 @@
     URL.revokeObjectURL(url);
   }
 
-  // ---------- toasts ----------
+  // ---------- compact non-intrusive top toasts (max 2, deduplicated) ----------
   function toast(msg, kind) {
+    const box = $('#toasts');
+    if (!box || !msg) return;
+    const text = String(msg);
+    const existing = [...box.children].find((el) => el.dataset.msg === text);
+    if (existing) {
+      clearTimeout(Number(existing.dataset.tid));
+      existing.dataset.tid = String(setTimeout(() => existing.remove(), kind === 'notif' ? 6000 : 3500));
+      return;
+    }
     const el = document.createElement('div');
     el.className = 'toast ' + (kind || 'info');
+    el.dataset.msg = text;
     el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
-    el.innerHTML = `<span>${h(msg)}</span><button aria-label="Cerrar" data-close-toast>×</button>`;
-    $('#toasts').appendChild(el);
-    while ($('#toasts').children.length > 4) $('#toasts').firstChild.remove();
-    setTimeout(() => el.remove(), kind === 'notif' ? 9000 : 5000);
+    el.innerHTML = `<span>${h(text)}</span><button aria-label="Cerrar" data-close-toast>×</button>`;
+    box.appendChild(el);
+    while (box.children.length > 2) box.firstChild.remove();
+    el.dataset.tid = String(setTimeout(() => el.remove(), kind === 'notif' ? 6000 : 3500));
   }
+
   function toastPendientes() {
     if (!ui.autenticado) return;
+    const u = me();
+    if (!u) return;
     let changed = false;
-    S.notificaciones.filter((n) => n.userId === ui.userId && !n.toasted).forEach((n) => {
-      n.toasted = true; changed = true;
+    (S.notificaciones || []).filter((n) => n.userId === u.id && !n.toasted).slice(-2).forEach((n) => {
+      n.toasted = true;
+      changed = true;
       toast('🔔 ' + n.texto, 'notif');
+      SND.playForNotification(u.rol, n.texto);
     });
     if (changed) saveLocal();
   }
 
-  // ---------- components ----------
+  // ---------- UI components ----------
   const SEM = { nuevo: 'gray', gestion: 'amber', pescado: 'lime', seguimiento: 'blue', desembolsado: 'green', descartado: 'red' };
   const badgeEstado = (e) => `<span class="badge b-${SEM[e]}">${h(est(e))}</span>`;
   const badgeTipoCredito = (tc) => {
@@ -321,9 +469,39 @@
     const cls = v.startsWith('RP') ? 'b-blue' : v.startsWith('RC') ? 'b-amber' : 'b-green';
     return `<span class="badge ${cls}" title="Tipo de crédito">${h(v)}</span>`;
   };
-  const captado = (p) => `<span class="badge b-origin" title="Promotor de origen (no modificable)">🔒 Captado por: ${h(p.promotor_nombre)} — Sucursal: ${h(p.sucursal)}</span>`;
-  const STEP_LBL = ['Registro', 'Call Center', 'Calificado', 'Seguimiento', 'Desembolso'];
 
+  // SLA Aging traffic-light badge for active pipeline prospects
+  function badgeSLA(p) {
+    if (!p || p.estado === 'desembolsado' || p.estado === 'descartado') return '';
+    const ref = new Date(p.actualizado || p.creado).getTime();
+    if (!ref || Number.isNaN(ref)) return '';
+    const hrs = Math.max(0, (Date.now() - ref) / 3600000);
+    let cls = 'sla-ok', dot = '🟢', lbl;
+    if (hrs < 1) {
+      lbl = Math.max(1, Math.round(hrs * 60)) + 'm';
+    } else if (hrs < 4) {
+      lbl = Math.floor(hrs) + 'h';
+    } else if (hrs <= 24) {
+      cls = 'sla-warn'; dot = '🟡';
+      lbl = Math.floor(hrs) + 'h';
+    } else {
+      cls = 'sla-hot'; dot = '🔴';
+      const d = Math.floor(hrs / 24);
+      const rem = Math.floor(hrs % 24);
+      lbl = rem ? `${d}d ${rem}h` : `${d}d`;
+    }
+    return `<span class="sla ${cls}" title="Tiempo en etapa actual">${dot} ${lbl}</span>`;
+  }
+
+  function originBadge(p, withBranch) {
+    const branchTxt = withBranch ? ` · ${h(p.sucursal)}` : '';
+    return `<span class="b-origin" title="Candado de Origen — Promotor captador (no modificable)">
+      <span class="origin-av">${h(iniciales(p.promotor_nombre))}</span>
+      <span class="origin-txt">🔒 ${h(p.promotor_nombre)}${branchTxt}</span>
+    </span>`;
+  }
+
+  const STEP_LBL = ['Registro', 'Call Center', 'Calificado', 'Seguimiento', 'Desembolso'];
   function progreso(p) {
     if (p.estado === 'descartado') return `<div class="progress discarded"><div class="bar"><span style="width:100%"></span></div><small>✖ ${h(p.motivoDescarte)}</small></div>`;
     const paso = C.PASO[p.estado];
@@ -332,8 +510,10 @@
     </div>`;
   }
 
-  function accionesCard(p) {
+  function accionesCard(p, opts) {
+    opts = opts || {};
     const u = me();
+    if (!u) return '';
     const t = C.transiciones(u, p);
     const b = [];
     const wa = 'https://wa.me/505' + p.telefono + '?text=' + encodeURIComponent(C.fill(S.config.plantillas.whatsapp, { cliente: p.nombre, agente: u.nombre, promotor: p.promotor_nombre, sucursal: p.sucursal }));
@@ -343,7 +523,7 @@
     if ((u.rol === 'gerente' || u.rol === 'gestor') && p.estado === 'seguimiento') b.push(`<button class="btn sm primary" data-action="estado" data-id="${p.id}" data-pre="desembolsado">Cerrar caso</button>`);
     if (u.rol === 'gerente' && p.estado === 'seguimiento') b.push(`<button class="btn sm ghost" data-action="estado" data-id="${p.id}" data-pre="seguimiento">Reasignar apoyo</button>`);
     if (u.rol === 'admin') b.push(`<button class="btn sm ghost" data-action="editar" data-id="${p.id}">✏️ Editar</button>`, `<button class="btn sm primary" data-action="estado" data-id="${p.id}">Cambiar estado</button>`);
-    b.push(`<button class="btn sm ghost" data-action="ver" data-id="${p.id}">🕒 Historial</button>`);
+    if (!opts.inDrawer) b.push(`<button class="btn sm ghost" data-action="ver" data-id="${p.id}">🕒 Historial</button>`);
     return `<div class="actions">${b.join('')}</div>`;
   }
 
@@ -354,13 +534,13 @@
       <header>
         <div>
           <h3>${h(p.nombre)}</h3>
-          <small>${fecha(p.creado)} · ${telFmt(p.telefono)}${p.telefonoSecundario ? ' / ' + telFmt(p.telefonoSecundario) : ''}</small>
+          <small class="tel-num">${fecha(p.creado)} · ${telFmt(p.telefono)}${p.telefonoSecundario ? ' / ' + telFmt(p.telefonoSecundario) : ''}</small>
         </div>
-        <div class="badges-col">${badgeEstado(p.estado)} ${badgeTipoCredito(p.tipoCredito)}</div>
+        <div class="badges-col">${badgeEstado(p.estado)} <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">${badgeSLA(p)} ${badgeTipoCredito(p.tipoCredito)}</div></div>
       </header>
-      ${opts.sello ? `<div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> <em>(No modificable)</em></div>` : captado(p)}
+      ${opts.sello ? `<div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> <em>(No modificable)</em></div>` : originBadge(p, true)}
       <dl class="facts">
-        <div><dt>Monto</dt><dd>${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</dd></div>
+        <div><dt>Monto</dt><dd class="money">${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</dd></div>
         <div><dt>Negocio</dt><dd>${h((p.cc && p.cc.rubro) || p.negocio || '—')}</dd></div>
         <div><dt>Canal / Origen</dt><dd>${h(p.plataforma || 'Cambaceo / Campo')}${p.campana ? ` · <small>${h(p.campana)}</small>` : ''}</dd></div>
         <div><dt>Cédula</dt><dd>${h(p.cedula || '—')}</dd></div>
@@ -377,9 +557,77 @@
     ? `<div class="grid">${arr.slice().sort((a, b) => b.actualizado.localeCompare(a.actualizado)).map((p) => card(p, opts)).join('')}</div>`
     : `<div class="empty">${h(vacio || 'No hay prospectos aquí.')}</div>`;
 
+  function viewSwitcherHTML() {
+    return `<div class="view-switch" role="group" aria-label="Modo de visualización">
+      <button type="button" class="${ui.viewMode === 'tabla' ? 'on' : ''}" data-action="view-mode" data-val="tabla">📋 Tabla</button>
+      <button type="button" class="${ui.viewMode === 'tarjetas' ? 'on' : ''}" data-action="view-mode" data-val="tarjetas">🗂️ Tarjetas</button>
+      <button type="button" class="${ui.viewMode === 'kanban' ? 'on' : ''}" data-action="view-mode" data-val="kanban">📊 Kanban</button>
+    </div>`;
+  }
+
+  function kanbanHTML(arr, opts) {
+    opts = opts || {};
+    const stages = opts.stages || C.ESTADOS;
+    return `<div class="kanban">
+      ${stages.map((st) => {
+        const items = arr.filter((p) => p.estado === st).sort((a, b) => b.actualizado.localeCompare(a.actualizado));
+        const totalMonto = items.reduce((sum, p) => sum + Number((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto || 0), 0);
+        return `<section class="kanban-col">
+          <div class="kanban-head">
+            <div class="kanban-head-top">
+              <span class="kanban-title"><i class="k-dot ${SEM[st]}"></i> ${h(est(st))}</span>
+              <span class="pill">${items.length}</span>
+            </div>
+            <span class="kanban-total">${money(totalMonto)}</span>
+          </div>
+          <div class="kanban-cards">
+            ${items.length ? items.map((p) => {
+              const monto = (p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto || 0;
+              return `<div class="kanban-card" data-action="ver" data-id="${p.id}">
+                <div class="kanban-card-top">
+                  <h4>${h(p.nombre)}</h4>
+                  ${badgeSLA(p)}
+                </div>
+                <div class="kanban-meta">
+                  <span class="money">${money(monto)}</span>
+                  <span class="tel-num">${telFmt(p.telefono)}</span>
+                </div>
+                <div class="kanban-meta">
+                  <span>${h(p.sucursal)} · ${h((p.cc && p.cc.rubro) || p.negocio || '—')}</span>
+                </div>
+                ${originBadge(p, false)}
+              </div>`;
+            }).join('') : '<div class="kanban-empty">Sin prospectos</div>'}
+          </div>
+        </section>`;
+      }).join('')}
+    </div>`;
+  }
+
+  function prospectosViewHTML(arr, opts) {
+    opts = opts || {};
+    if (ui.viewMode === 'kanban') return kanbanHTML(arr, opts);
+    if (ui.viewMode === 'tarjetas') return lista(arr, opts, 'Sin resultados para estos filtros.');
+    if (!arr.length) return '<div class="empty">Sin resultados para estos filtros.</div>';
+    const rows = arr.slice().sort((a, b) => b.creado.localeCompare(a.creado));
+    return `<div class="table-wrap"><table class="table">
+      <thead><tr><th>Fecha / SLA</th><th>Cliente</th><th>Tipo</th><th>Teléfono</th><th>Captado por</th><th>Sucursal</th><th>Monto</th><th>Estado</th><th>Acciones</th></tr></thead>
+      <tbody>${rows.map((p) => `<tr>
+        <td><div>${fechaCorta(p.creado)}</div>${badgeSLA(p)}</td>
+        <td><b>${h(p.nombre)}</b><br><small>${h((p.cc && p.cc.rubro) || p.negocio || '—')} · ${h(p.plataforma || 'Campo')}</small></td>
+        <td>${badgeTipoCredito(p.tipoCredito)}</td>
+        <td class="tel-num">${telFmt(p.telefono)}${p.telefonoSecundario ? `<br><small>${telFmt(p.telefonoSecundario)}</small>` : ''}</td>
+        <td>${originBadge(p, false)}</td>
+        <td>${h(p.sucursal)}</td>
+        <td class="money"><b>${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</b></td>
+        <td>${badgeEstado(p.estado)}</td>
+        <td>${accionesCard(p)}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+
   function tabs(key, items) {
     const cur = ui.tab[key] || items[0][0];
-    return `<nav class="tabs" role="tablist">${items.map(([k, l, n]) => `<button role="tab" aria-selected="${k === cur}" class="${k === cur ? 'on' : ''}" data-action="tab" data-key="${key}" data-val="${k}">${l}${n !== undefined ? ` <span class="pill">${n}</span>` : ''}</button>`).join('')}</nav>`;
+    const covered = key !== 'adm' ? '1' : '0';
+    return `<nav class="tabs" role="tablist" data-mobile-covered="${covered}">${items.map(([k, l, n]) => `<button role="tab" aria-selected="${k === cur}" class="${k === cur ? 'on' : ''}" data-action="tab" data-key="${key}" data-val="${k}">${l}${n !== undefined ? ` <span class="pill">${n}</span>` : ''}</button>`).join('')}</nav>`;
   }
   const tabActual = (key, def) => ui.tab[key] || def;
 
@@ -399,10 +647,10 @@
 
   function filtrosHTML() {
     const f = ui.f;
-    const tcs = S.config.tiposCredito || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
+    const tcs = (S.config && S.config.tiposCredito) || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
     return `<form class="filters" data-form="filtros" onsubmit="return false">
       <input type="search" name="q" placeholder="Buscar nombre, teléfono, cédula, negocio o promotor" value="${h(f.q)}" aria-label="Buscar">
-      <select name="sucursal" aria-label="Sucursal"><option value="">Todas las sucursales</option>${S.config.sucursales.map((s) => `<option ${s === f.sucursal ? 'selected' : ''}>${h(s)}</option>`).join('')}</select>
+      <select name="sucursal" aria-label="Sucursal"><option value="">Todas las sucursales</option>${(S.config.sucursales || []).map((s) => `<option ${s === f.sucursal ? 'selected' : ''}>${h(s)}</option>`).join('')}</select>
       <select name="estado" aria-label="Estado"><option value="">Todos los estados</option>${C.ESTADOS.map((e) => `<option value="${e}" ${e === f.estado ? 'selected' : ''}>${h(est(e))}</option>`).join('')}</select>
       <select name="tipoCredito" aria-label="Tipo de Crédito"><option value="">Todo Tipo Crédito</option>${tcs.map((t) => `<option value="${h(t)}" ${t === f.tipoCredito ? 'selected' : ''}>${h(t)}</option>`).join('')}</select>
       <label>Desde <input type="date" name="desde" value="${h(f.desde)}"></label>
@@ -414,31 +662,13 @@
     </form>`;
   }
 
-  function tablaHTML(arr) {
-    if (!arr.length) return '<div class="empty">Sin resultados para estos filtros.</div>';
-    const rows = arr.slice().sort((a, b) => b.creado.localeCompare(a.creado));
-    return `<div class="table-wrap"><table class="table">
-      <thead><tr><th>Fecha</th><th>Cliente</th><th>Tipo</th><th>Teléfono</th><th>Captado por</th><th>Sucursal</th><th>Monto</th><th>Estado</th><th></th></tr></thead>
-      <tbody>${rows.map((p) => `<tr>
-        <td>${fechaCorta(p.creado)}</td>
-        <td><b>${h(p.nombre)}</b><br><small>${h((p.cc && p.cc.rubro) || p.negocio || '—')} · ${h(p.plataforma || 'Campo')}</small></td>
-        <td>${badgeTipoCredito(p.tipoCredito)}</td>
-        <td>${telFmt(p.telefono)}${p.telefonoSecundario ? `<br><small>${telFmt(p.telefonoSecundario)}</small>` : ''}</td>
-        <td><span class="badge b-origin">🔒 ${h(p.promotor_nombre)}</span></td>
-        <td>${h(p.sucursal)}</td>
-        <td>${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</td>
-        <td>${badgeEstado(p.estado)}</td>
-        <td>${accionesCard(p)}</td></tr>`).join('')}</tbody></table></div>
-      <div class="cards-only">${lista(rows)}</div>`;
-  }
-
   // ---------- Login View (Clean Production Auth) ----------
   function vistaLogin() {
     const dbRoute = isDbManagerUrl();
     return `<div class="login-wrap">
       <section class="panel login-card">
         <div class="login-header">
-          <img src="icon.svg" alt="AlfaTrack" width="48" height="48">
+          <img src="icon.svg" alt="AlfaTrack" width="46" height="46">
           <div>
             <h2>${dbRoute ? '🗄️ Gestor Web Turso Cloud SQLite — AlfaTrack' : 'Acceso al Sistema — AlfaTrack'}</h2>
             <p class="hint">${dbRoute ? 'Inicia sesión con tu cuenta de Administrador General para acceder al Explorador de Tablas, Consola SQL y Respaldos en Turso Cloud.' : 'AlfaCredit S.A. · Control y Seguimiento de Prospectos'}</p>
@@ -448,7 +678,7 @@
           <span class="badge ${ui.db.tursoConnected ? 'b-green' : 'b-amber'}">
             ${ui.db.tursoConnected ? '🟢 Base de Datos Turso Cloud SQLite Conectada' : '🟡 Base de Datos Sincronizada'}
           </span>
-          <small>${dbRoute ? 'Conexión JWT Autenticada' : 'Acceso Corporativo Seguro'}</small>
+          <small>${dbRoute ? 'Sesión Firmada HMAC-SHA256' : 'Acceso Corporativo Seguro'}</small>
         </div>
         <form class="form" data-form="login" autocomplete="on">
           <label>Usuario o Correo *
@@ -466,7 +696,7 @@
     </div>`;
   }
 
-  // ---------- Depurador & Clasificador CSV Component (from NUEVOS-CLIENTE.html) ----------
+  // ---------- Depurador & Clasificador CSV Component ----------
   function vistaDepuradorCSV(u) {
     const cl = ui.csv.clasif || C.clasificarFilasCSV(S, ui.csv.filas, {
       promotorDefault: u.rol === 'promotor' ? u : null,
@@ -494,12 +724,14 @@
         </div>
         <button type="button" class="btn sm ghost" data-action="csv-ejemplo">📋 Cargar Ejemplo Real de Promotores</button>
       </div>
-      <div class="cols" style="margin:10px 0">
-        <label class="file-drop">📂 Seleccionar archivo CSV (.csv)
+      <div class="csv-grid">
+        <label class="file-drop">
+          <span>📂 Seleccionar archivo CSV (.csv)</span>
           <input type="file" accept=".csv,.txt" data-change="csv-file">
+          <small>Soporta UTF-8 y Windows-1252 (Excel)</small>
         </label>
-        <label style="grid-column: span 2">O pega aquí las filas CSV de tus formularios:
-          <textarea rows="4" data-input="csv-text" placeholder="Cliente,Telefono,Promotor,VALOR&#10;Elizabeth Lopez,84943179,Laura Varela,15000&#10;Bismarck José López,57591567,Yeiling Muñoz,20000">${h(ui.csv.rawText)}</textarea>
+        <label class="csv-textarea-wrap">O pega aquí las filas CSV de tus formularios:
+          <textarea class="csv-textarea" rows="5" data-input="csv-text" placeholder="Cliente,Telefono,Promotor,VALOR&#10;Elizabeth Lopez,84943179,Laura Varela,15000&#10;Bismarck José López,57591567,Yeiling Muñoz,20000">${h(ui.csv.rawText)}</textarea>
         </label>
       </div>
       <div class="row" style="margin-bottom:12px">
@@ -515,17 +747,17 @@
         <div class="quick">
           <button type="button" class="chip ${curTab === 'validos' ? 'on' : ''}" data-action="csv-tab" data-val="validos">✅ Válidos (${cl.validos.length})</button>
           <button type="button" class="chip ${curTab === 'duplicadosDB' ? 'on' : ''}" data-action="csv-tab" data-val="duplicadosDB">⚠️ Ya Registrados / Duplicados (${cl.duplicadosDB.length})</button>
-          <button type="button" class="chip ${curTab === 'especiales' ? 'on' : ''}" data-action="csv-tab" data-val="especiales">🔣 Caracteres Especiales (${cl.especiales.length})</button>
-          <button type="button" class="chip ${curTab === 'longitud' ? 'on' : ''}" data-action="csv-tab" data-val="longitud">📏 Longitud Incorrecta (${cl.longitud.length})</button>
-          <button type="button" class="chip ${curTab === 'texto' ? 'on' : ''}" data-action="csv-tab" data-val="texto">🔤 Contiene Texto (${cl.texto.length})</button>
+          <button type="button" class="chip ${curTab === 'especiales' ? 'on' : ''}" data-action="csv-tab" data-val="especiales">🔣 Especiales (${cl.especiales.length})</button>
+          <button type="button" class="chip ${curTab === 'longitud' ? 'on' : ''}" data-action="csv-tab" data-val="longitud">📏 Longitud (${cl.longitud.length})</button>
+          <button type="button" class="chip ${curTab === 'texto' ? 'on' : ''}" data-action="csv-tab" data-val="texto">🔤 Texto (${cl.texto.length})</button>
           <button type="button" class="chip ${curTab === 'vacios' ? 'on' : ''}" data-action="csv-tab" data-val="vacios">⬜ Vacíos (${cl.vacios.length})</button>
-          <button type="button" class="chip ${curTab === 'repetidosTelefono' ? 'on' : ''}" data-action="csv-tab" data-val="repetidosTelefono">🔁 Teléfonos Repetidos (${cl.repetidosTelefono.length})</button>
+          <button type="button" class="chip ${curTab === 'repetidosTelefono' ? 'on' : ''}" data-action="csv-tab" data-val="repetidosTelefono">🔁 Tel. Repetidos (${cl.repetidosTelefono.length})</button>
           <button type="button" class="chip ${curTab === 'repetidosCliente' ? 'on' : ''}" data-action="csv-tab" data-val="repetidosCliente">👥 Clientes Repetidos (${cl.repetidosCliente.length})</button>
         </div>
         <div class="table-wrap">
           ${curTab === 'repetidosTelefono' ? `
             <table class="table"><thead><tr><th>Teléfono Válido</th><th>Cant. Repeticiones</th><th>Clientes Asociados</th></tr></thead>
-            <tbody>${listCur.map((r) => `<tr><td><b>${telFmt(r.telefono)}</b></td><td><span class="badge b-red">${r.repeticiones}</span></td><td>${h(r.clientes)}</td></tr>`).join('') || '<tr><td colspan="3">Sin teléfonos repetidos.</td></tr>'}</tbody></table>
+            <tbody>${listCur.map((r) => `<tr><td class="tel-num"><b>${telFmt(r.telefono)}</b></td><td><span class="badge b-red">${r.repeticiones}</span></td><td>${h(r.clientes)}</td></tr>`).join('') || '<tr><td colspan="3">Sin teléfonos repetidos.</td></tr>'}</tbody></table>
           ` : curTab === 'repetidosCliente' ? `
             <table class="table"><thead><tr><th>Nombre del Cliente</th><th>Cant. Repeticiones</th><th>Teléfonos Asociados</th></tr></thead>
             <tbody>${listCur.map((r) => `<tr><td><b>${h(r.nombre)}</b></td><td><span class="badge b-red">${r.repeticiones}</span></td><td>${h(r.telefonos)}</td></tr>`).join('') || '<tr><td colspan="3">Sin clientes repetidos.</td></tr>'}</tbody></table>
@@ -535,10 +767,10 @@
               <td>${r.fila}</td>
               <td><b>${h(r.nombre)}</b></td>
               <td><code>${h(r.telefonoOriginal || '—')}</code></td>
-              <td>${r.telefono ? `<b>${telFmt(r.telefono)}</b>` : '—'}${r.telefonoSecundario ? ` <small>(+${telFmt(r.telefonoSecundario)})</small>` : ''}</td>
-              <td><span class="badge b-origin">🔒 ${h(r.promotorNombre)}</span>${r.promotorOriginal && r.promotorOriginal !== r.promotorNombre ? `<br><small>CSV: ${h(r.promotorOriginal)}</small>` : ''}</td>
+              <td class="tel-num">${r.telefono ? `<b>${telFmt(r.telefono)}</b>` : '—'}${r.telefonoSecundario ? ` <small>(+${telFmt(r.telefonoSecundario)})</small>` : ''}</td>
+              <td>${originBadge({ promotor_nombre: r.promotorNombre, sucursal: r.sucursal }, false)}${r.promotorOriginal && r.promotorOriginal !== r.promotorNombre ? `<br><small>CSV: ${h(r.promotorOriginal)}</small>` : ''}</td>
               <td>${h(r.sucursal)}</td>
-              <td>${r.motivoDuplicado ? `<span class="badge b-red">${h(r.motivoDuplicado)}</span>` : (r.monto ? money(r.monto) : h(r.valorOriginal || '—'))}</td>
+              <td class="money">${r.motivoDuplicado ? `<span class="badge b-red">${h(r.motivoDuplicado)}</span>` : (r.monto ? money(r.monto) : h(r.valorOriginal || '—'))}</td>
             </tr>`).join('') || '<tr><td colspan="7">No hay registros en esta categoría.</td></tr>'}</tbody></table>
           `}
         </div>
@@ -547,6 +779,15 @@
   }
 
   // ---------- views ----------
+  function filtrarPromotor(u) {
+    const mios = C.visibles(S, u);
+    const q = ui.proSearch.trim().toLowerCase();
+    return mios.filter((p) =>
+      (!ui.proFilter || p.estado === ui.proFilter) &&
+      (!q || [p.nombre, p.telefono, p.telefonoSecundario, p.cedula, p.negocio, p.direccion].join(' ').toLowerCase().includes(q))
+    );
+  }
+
   function vistaPromotor(u) {
     const mios = C.visibles(S, u);
     const tab = tabActual('pro', 'mis');
@@ -568,11 +809,11 @@
           <label>Tipo de Crédito *<select name="tipoCredito">${tcs.map((t) => `<option value="${h(t)}">${h(t)}</option>`).join('')}</select></label>
         </div>
         <div class="cols two">
-          <label>Teléfono / WhatsApp * <small>(8 dígitos)</small><input name="telefono" inputmode="numeric" required maxlength="9" placeholder="8888-8888" data-dup></label>
-          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="9" placeholder="7777-7777"></label>
+          <label><span class="field-head"><span>Teléfono / WhatsApp *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="9" placeholder="8888-8888" data-dup data-fmt="tel"></label>
+          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="9" placeholder="7777-7777" data-fmt="tel"></label>
         </div>
         <div class="cols two">
-          <label>Cédula <small>(opcional)</small><input name="cedula" placeholder="001-010190-0001A" data-dup></label>
+          <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
           <label>Monto aproximado solicitado (C$)<input name="monto" type="number" min="1" step="100" inputmode="numeric" placeholder="Ej: 15000"></label>
         </div>
         <div id="dup-alert" class="alert" hidden></div>
@@ -590,18 +831,17 @@
     } else if (tab === 'ganados') {
       body = lista(ganados, {}, 'Aún no tienes créditos desembolsados.');
     } else {
-      const q = ui.proSearch.trim().toLowerCase();
-      const filtradosMios = mios.filter((p) =>
-        (!ui.proFilter || p.estado === ui.proFilter) &&
-        (!q || [p.nombre, p.telefono, p.negocio, p.direccion].join(' ').toLowerCase().includes(q))
-      );
-      body = `<div class="quick">
+      const filtradosMios = filtrarPromotor(u);
+      body = `<div class="search-bar">
+          <input type="search" data-input="pro-search" value="${h(ui.proSearch)}" placeholder="🔍 Buscar por cliente, teléfono, cédula, negocio o dirección…" aria-label="Buscar en mis prospectos">
+        </div>
+        <div class="quick">
           <button type="button" class="chip ${!ui.proFilter ? 'on' : ''}" data-action="pf" data-val="">Todos (${mios.length})</button>
           <button type="button" class="chip ${ui.proFilter === 'nuevo' ? 'on' : ''}" data-action="pf" data-val="nuevo">En cola (${mios.filter((x) => x.estado === 'nuevo').length})</button>
           <button type="button" class="chip ${ui.proFilter === 'pescado' ? 'on' : ''}" data-action="pf" data-val="pescado">Pescados (${mios.filter((x) => x.estado === 'pescado').length})</button>
           <button type="button" class="chip ${ui.proFilter === 'seguimiento' ? 'on' : ''}" data-action="pf" data-val="seguimiento">En seguimiento (${mios.filter((x) => x.estado === 'seguimiento').length})</button>
         </div>
-        ${lista(filtradosMios, {}, 'Aún no has registrado prospectos. Toca "+ Registrar".')}`;
+        <div id="pro-list">${lista(filtradosMios, {}, ui.proSearch ? 'Sin coincidencias para tu búsqueda.' : 'Aún no has registrado prospectos. Toca "+ Registrar".')}</div>`;
     }
     return `<section class="kpis four">
         <div class="kpi"><b>${mios.length}</b><span>Mis prospectos</span></div>
@@ -641,11 +881,11 @@
         </div>
         <div class="cols two">
           <label>Nombre Completo del Cliente *<input name="nombre" required minlength="3" placeholder="Ej: Juan Carlos Pérez Gómez"></label>
-          <label>Teléfono de Contacto * <small>(8 dígitos)</small><input name="telefono" inputmode="numeric" required maxlength="9" placeholder="8888-9999" data-dup></label>
+          <label><span class="field-head"><span>Teléfono de Contacto *</span><span class="field-status" id="tel-status">0/8 dígitos</span></span><input name="telefono" inputmode="numeric" required maxlength="9" placeholder="8888-9999" data-dup data-fmt="tel"></label>
         </div>
         <div class="cols two">
-          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="9" placeholder="7777-1111"></label>
-          <label>Cédula <small>(opcional)</small><input name="cedula" placeholder="001-010190-0001A" data-dup></label>
+          <label>Teléfono Secundario <small>(opcional)</small><input name="telefonoSecundario" inputmode="numeric" maxlength="9" placeholder="7777-1111" data-fmt="tel"></label>
+          <label><span class="field-head"><span>Cédula <small>(opcional)</small></span><span class="field-status" id="ced-status"></span></span><input name="cedula" maxlength="16" placeholder="001-010190-0001A" data-dup data-fmt="ced"></label>
         </div>
         <div id="dup-alert" class="alert" hidden></div>
         <div class="cols two">
@@ -663,14 +903,17 @@
     } else if (tab === 'csv') {
       body = vistaDepuradorCSV(u);
     } else {
-      body = `<div class="quick">
-          <button class="chip ${ui.f.estado === 'nuevo' ? 'on' : ''}" data-action="qf" data-val="nuevo">Cola nueva (${cola})</button>
-          <button class="chip ${ui.f.estado === 'gestion' ? 'on' : ''}" data-action="qf" data-val="gestion">En gestión (${gest})</button>
-          <button class="chip ${ui.f.estado === 'pescado' ? 'on' : ''}" data-action="qf" data-val="pescado">Pescados (${pesc})</button>
-          <button class="chip ${!ui.f.estado ? 'on' : ''}" data-action="qf" data-val="">Todos (${todos.length})</button>
+      body = `<div class="toolbar-row">
+          <div class="quick" style="margin:0">
+            <button class="chip ${ui.f.estado === 'nuevo' ? 'on' : ''}" data-action="qf" data-val="nuevo">Cola nueva (${cola})</button>
+            <button class="chip ${ui.f.estado === 'gestion' ? 'on' : ''}" data-action="qf" data-val="gestion">En gestión (${gest})</button>
+            <button class="chip ${ui.f.estado === 'pescado' ? 'on' : ''}" data-action="qf" data-val="pescado">Pescados (${pesc})</button>
+            <button class="chip ${!ui.f.estado ? 'on' : ''}" data-action="qf" data-val="">Todos (${todos.length})</button>
+          </div>
+          ${viewSwitcherHTML()}
         </div>
         ${filtrosHTML()}
-        <div id="list">${tablaHTML(filtrar(todos))}</div>`;
+        <div id="list">${prospectosViewHTML(filtrar(todos))}</div>`;
     }
 
     return `<section class="kpis four">
@@ -679,7 +922,7 @@
         <div class="kpi lime"><b>${pesc}</b><span>Pescados</span></div>
         <div class="kpi green"><b>${desem}</b><span>Desembolsados</span></div>
       </section>
-      ${tabs('cc', [['bandeja', '📞 Bandeja de Llamadas', cola + gest], ['captura', '📝 Captura Call Center'], ['csv', '📥 Depurador CSV Promotores']])}
+      ${tabs('cc', [['bandeja', '📞 Bandeja de Llamadas', cola + gest], ['captura', '📝 Captura Call Center'], ['csv', '📥 Depurador CSV']])}
       ${body}`;
   }
 
@@ -703,31 +946,34 @@
           <thead><tr><th>Nombre</th><th>Rol</th><th>Usuario</th><th>Captados / Asignados</th><th>Desembolsados</th><th>Monto Colocado</th></tr></thead>
           <tbody>${equipo.map((x) => {
             const pros = x.rol === 'promotor'
-              ? S.prospectos.filter((p) => p.promotor_origen_id === x.id)
-              : S.prospectos.filter((p) => p.gestorId === x.id);
+              ? mios.filter((p) => p.promotor_origen_id === x.id)
+              : mios.filter((p) => p.gestorId === x.id);
             const gan = pros.filter((p) => p.estado === 'desembolsado');
             const m = gan.reduce((a, p) => a + Number((p.desembolso && p.desembolso.monto) || 0), 0);
             return `<tr>
               <td><b>${h(x.nombre)}</b></td>
               <td><span class="badge ${x.rol === 'promotor' ? 'b-green' : 'b-blue'}">${h(C.ROLES[x.rol])}</span></td>
               <td><code>${h(x.username)}</code></td>
-              <td>${pros.length}</td>
-              <td>${gan.length}</td>
-              <td>${money(m)}</td>
+              <td class="tnum">${pros.length}</td>
+              <td class="tnum">${gan.length}</td>
+              <td class="money">${money(m)}</td>
             </tr>`;
           }).join('')}</tbody>
         </table></div>
       </div>`;
-    } else body = lista(mios, { sello: true });
+    } else {
+      body = `<div class="toolbar-row"><h3 style="margin:0">Pipeline Sucursal ${h(u.sucursal)}</h3>${viewSwitcherHTML()}</div>
+        <div id="list">${prospectosViewHTML(mios, { sello: true })}</div>`;
+    }
 
-    return `<div class="row"><h2 class="title">Sucursal ${h(u.sucursal)}</h2><span class="badge b-blue">✉️ ${h(emailGer)}</span></div>
+    return `<div class="row" style="margin-bottom:8px"><h2 class="title" style="margin:0">Sucursal ${h(u.sucursal)}</h2><span class="badge b-blue">✉️ ${h(emailGer)}</span></div>
       <section class="kpis four">
         <div class="kpi lime"><b>${pesc.length}</b><span>Pescados pendientes</span></div>
         <div class="kpi blue"><b>${seg.length}</b><span>En seguimiento</span></div>
         <div class="kpi green"><b>${desem.length}</b><span>Desembolsados</span></div>
         <div class="kpi"><b>${money(montoSuc)}</b><span>Monto sucursal</span></div>
       </section>
-      ${tabs('ger', [['pescados', 'Clientes Pescados por Call Center', pesc.length], ['seguimiento', 'En seguimiento', seg.length], ['todos', 'Todos', mios.length], ['equipo', '👥 Mi Equipo', equipo.length]])}
+      ${tabs('ger', [['pescados', 'Clientes Pescados por Call Center', pesc.length], ['seguimiento', 'En seguimiento', seg.length], ['todos', 'Pipeline / Todos', mios.length], ['equipo', '👥 Mi Equipo', equipo.length]])}
       ${body}`;
   }
 
@@ -755,7 +1001,7 @@
       tursoConnected: ui.db.tursoConnected,
       latencyMs: 90,
       tables: [
-        { name: 'alfatrack_usuarios', rows: S.usuarios.length, desc: 'Usuarios, roles, sucursales y contraseñas (hash + gestión)' },
+        { name: 'alfatrack_usuarios', rows: S.usuarios.length, desc: 'Usuarios, roles, sucursales y contraseñas (hash scrypt + gestión)' },
         { name: 'alfatrack_prospectos', rows: S.prospectos.length, desc: 'Prospectos, candado de origen, pipeline y bitácora' },
         { name: 'alfatrack_notificaciones', rows: S.notificaciones.length, desc: 'Alertas en tiempo real por usuario' },
         { name: 'alfatrack_auditoria', rows: S.auditoria.length, desc: 'Bitácora global de seguridad y sesiones' },
@@ -778,11 +1024,11 @@
         <div class="row">
           <div>
             <h3>🗄️ Gestor de Base de Datos en la Nube — Turso libSQL (SQLite Distribuido)</h3>
-            <p class="hint">Clúster autenticado con JWT: <b>Turso Cloud SQLite (AWS us-east-2 · baseinventario)</b> · Link directo a este Gestor Web: <a href="/turso"><code>${h(webDbLink)}</code></a></p>
+            <p class="hint">Clúster autenticado: <b>Turso Cloud SQLite (AWS us-east-2 · baseinventario)</b> · Link directo: <a href="/turso"><code>${h(webDbLink)}</code></a></p>
           </div>
           <div class="actions">
-            <button type="button" class="btn sm primary" data-action="db-sync-now">☁️ Sincronizar con Turso Ahora</button>
-            <button type="button" class="btn sm ghost" data-action="db-download-json">⬇️ Descargar Respaldo (.JSON)</button>
+            <button type="button" class="btn sm primary" data-action="db-sync-now">☁️ Sincronizar con Turso</button>
+            <button type="button" class="btn sm ghost" data-action="db-download-json">⬇️ Respaldo (.JSON)</button>
             <label class="btn sm ghost" style="margin:0;cursor:pointer">📂 Importar JSON<input type="file" accept=".json" data-change="db-import-json" hidden></label>
           </div>
         </div>
@@ -792,7 +1038,7 @@
             <tbody>
               ${stats.tables.map((t) => `<tr>
                 <td><code><b>${h(t.name)}</b></code></td>
-                <td><span class="badge b-blue">${t.rows} filas</span></td>
+                <td><span class="badge b-blue tnum">${t.rows} filas</span></td>
                 <td>${h(t.desc)}</td>
                 <td><button type="button" class="btn sm ghost" data-action="db-ver-tabla" data-table="${h(t.name)}">🔍 Explorar tabla</button></td>
               </tr>`).join('')}
@@ -818,7 +1064,7 @@
 
       <div class="panel">
         <h3>💻 Consola SQL de Diagnóstico (Turso Cloud libSQL)</h3>
-        <p class="hint">Ejecuta consultas SQL en tiempo real sobre las tablas <code>alfatrack_usuarios</code>, <code>alfatrack_prospectos</code>, <code>alfatrack_notificaciones</code> y <code>alfatrack_auditoria</code>.</p>
+        <p class="hint">Ejecuta consultas SQL de lectura (<code>SELECT / PRAGMA / EXPLAIN</code>) en tiempo real sobre Turso Cloud.</p>
         <div class="quick">
           <button type="button" class="chip" data-action="db-preset-sql" data-sql="SELECT username, password, nombre, rol, sucursal, activo FROM alfatrack_usuarios ORDER BY rol, sucursal">Usuarios y Contraseñas</button>
           <button type="button" class="chip" data-action="db-preset-sql" data-sql="SELECT sucursal, estado, COUNT(*) AS total, SUM(monto) AS monto_total FROM alfatrack_prospectos GROUP BY sucursal, estado">Resumen por Sucursal</button>
@@ -831,7 +1077,7 @@
         </form>
         ${sqlRes ? (sqlRes.ok ? `
           <div class="table-wrap" style="max-height:360px;overflow:auto;margin-top:10px">
-            <small>✅ Consulta ejecutada en ${sqlRes.latencyMs || 1} ms (${(sqlRes.rows || []).length} filas)</small>
+            <div style="padding:6px 10px"><small>✅ Consulta ejecutada en ${sqlRes.latencyMs || 1} ms (${(sqlRes.rows || []).length} filas)</small></div>
             <table class="table">
               <thead><tr>${(sqlRes.columns || []).map((c) => `<th>${h(c)}</th>`).join('')}</tr></thead>
               <tbody>${(sqlRes.rows || []).map((r) => `<tr>${(sqlRes.columns || []).map((c) => `<td>${h(r[c])}</td>`).join('')}</tr>`).join('') || '<tr><td>Sin filas</td></tr>'}</tbody>
@@ -869,6 +1115,30 @@
       </div>`;
   }
 
+  function filtrarUsuarios() {
+    const q = ui.userSearch.trim().toLowerCase();
+    return S.usuarios.filter((x) =>
+      (!ui.userRoleFilter || x.rol === ui.userRoleFilter) &&
+      (!ui.userBranchFilter || x.sucursal === ui.userBranchFilter) &&
+      (!q || [x.nombre, x.username, x.sucursal, x.email, C.ROLES[x.rol]].join(' ').toLowerCase().includes(q))
+    ).sort((a, b) => (a.rol === 'admin' ? -1 : b.rol === 'admin' ? 1 : a.rol.localeCompare(b.rol) || a.sucursal.localeCompare(b.sucursal) || a.nombre.localeCompare(b.nombre)));
+  }
+
+  function renderUsuariosRows(usuariosFiltrados, u) {
+    return usuariosFiltrados.map((x) => `<tr class="${x.activo ? '' : 'off'}">
+      <td><b>${h(x.nombre)}</b>${x.email ? `<br><small>${h(x.email)}</small>` : ''}</td>
+      <td>${h(C.ROLES[x.rol])}</td>
+      <td>${h(x.sucursal)}</td>
+      <td><code><b>${h(x.username)}</b></code></td>
+      <td><code>${ui.showPasswords ? h(x.password || '') : '••••••••'}</code></td>
+      <td>${x.activo ? '<span class="badge b-green">Activo</span>' : '<span class="badge b-red">De baja</span>'}</td>
+      <td class="actions">
+        <button class="btn sm ghost" data-action="copiar-cred" data-user="${h(x.username)}" data-pass="${h(x.password || '')}" data-nombre="${h(x.nombre)}" title="Copiar usuario y contraseña">📋 Copiar</button>
+        <button class="btn sm ghost" data-action="usuario" data-id="${x.id}">Editar / Clave</button>
+        ${x.id === u.id ? '' : `<button class="btn sm ${x.activo ? 'danger' : 'ghost'}" data-action="toggle-usuario" data-id="${x.id}">${x.activo ? 'Dar de baja' : 'Reactivar'}</button>`}
+      </td></tr>`).join('') || '<tr><td colspan="7">Sin usuarios que coincidan con el filtro.</td></tr>';
+  }
+
   function vistaAdmin(u) {
     const tab = tabActual('adm', 'metricas');
     const nav = tabs('adm', [
@@ -892,37 +1162,33 @@
           <div class="kpi lime"><b>${money(monto)}</b><span>Monto colocado</span></div>
         </section>
         <div class="cols two">
-          <div class="panel"><h3>Embudo por estado</h3>${C.ESTADOS.map((e) => `<div class="hbar"><span>${h(est(e))}</span><div><i class="b-${SEM[e]}" style="width:${(m.porEstado[e] / max) * 100}%"></i></div><b>${m.porEstado[e]}</b></div>`).join('')}</div>
+          <div class="panel"><h3>Embudo por estado</h3>${C.ESTADOS.map((e) => `<div class="hbar"><span>${h(est(e))}</span><div><i class="b-${SEM[e]}" style="width:${(m.porEstado[e] / max) * 100}%"></i></div><b class="tnum">${m.porEstado[e]}</b></div>`).join('')}</div>
           <div class="panel">
             <h3>Por Tipo de Crédito y Canal</h3>
-            ${Object.entries(m.porTipoCredito || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-blue" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b>${v}</b></div>`).join('')}
+            ${Object.entries(m.porTipoCredito || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-blue" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b class="tnum">${v}</b></div>`).join('')}
             <hr style="border:0;border-top:1px solid var(--line);margin:10px 0">
-            ${Object.entries(m.porPlataforma || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-green" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b>${v}</b></div>`).join('')}
+            ${Object.entries(m.porPlataforma || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-green" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b class="tnum">${v}</b></div>`).join('')}
           </div>
         </div>
         <div class="panel"><h3>Por sucursal</h3><div class="table-wrap"><table class="table"><thead><tr><th>Sucursal</th><th>Correo Gerencia</th><th>Prospectos</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
-          ${Object.entries(m.porSucursal).sort((a, b) => b[1].total - a[1].total).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td><small>${h((S.config.emailsGerentes && S.config.emailsGerentes[s]) || '—')}</small></td><td>${x.total}</td><td>${x.desembolsado}</td><td>${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>
+          ${Object.entries(m.porSucursal).sort((a, b) => b[1].total - a[1].total).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td><small>${h((S.config.emailsGerentes && S.config.emailsGerentes[s]) || '—')}</small></td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>
         <div class="panel"><h3>Ranking de promotores (comisión por origen)</h3><div class="table-wrap"><table class="table"><thead><tr><th>Promotor</th><th>Sucursal</th><th>Captados</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
-          ${Object.values(m.porPromotor).sort((a, b) => b.monto - a.monto || b.total - a.total).map((x) => `<tr><td>🔒 ${h(x.nombre)}</td><td>${h(x.sucursal)}</td><td>${x.total}</td><td>${x.desembolsado}</td><td>${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>`;
+          ${Object.values(m.porPromotor).sort((a, b) => b.monto - a.monto || b.total - a.total).map((x) => `<tr><td>${originBadge({ promotor_nombre: x.nombre, sucursal: x.sucursal }, false)}</td><td>${h(x.sucursal)}</td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>`;
     } else if (tab === 'prospectos') {
-      body = `${filtrosHTML()}<div id="list">${tablaHTML(filtrar(S.prospectos))}</div>`;
+      body = `<div class="toolbar-row"><h3 style="margin:0">Pipeline Global (${S.prospectos.length})</h3>${viewSwitcherHTML()}</div>
+        ${filtrosHTML()}
+        <div id="list">${prospectosViewHTML(filtrar(S.prospectos))}</div>`;
     } else if (tab === 'usuarios') {
-      const q = ui.userSearch.trim().toLowerCase();
-      const usuariosFiltrados = S.usuarios.filter((x) =>
-        (!ui.userRoleFilter || x.rol === ui.userRoleFilter) &&
-        (!ui.userBranchFilter || x.sucursal === ui.userBranchFilter) &&
-        (!q || [x.nombre, x.username, x.sucursal, x.email, C.ROLES[x.rol]].join(' ').toLowerCase().includes(q))
-      ).sort((a, b) => (a.rol === 'admin' ? -1 : b.rol === 'admin' ? 1 : a.rol.localeCompare(b.rol) || a.sucursal.localeCompare(b.sucursal) || a.nombre.localeCompare(b.nombre)));
-
+      const usuariosFiltrados = filtrarUsuarios();
       body = `<div class="panel">
         <div class="row">
           <div>
-            <h3>👥 Gestión de Usuarios, Promotores y Contraseñas (${usuariosFiltrados.length} de ${S.usuarios.length})</h3>
+            <h3>👥 Gestión de Usuarios, Promotores y Contraseñas (<span id="users-count">${usuariosFiltrados.length}</span> de ${S.usuarios.length})</h3>
             <p class="hint">Administra usuarios y contraseñas de todos los promotores actuales, agentes de Call Center, gerentes y gestores.</p>
           </div>
           <div class="actions">
             <button type="button" class="btn sm ghost" data-action="toggle-show-pwd">${ui.showPasswords ? '🙈 Ocultar Claves' : '👁️ Mostrar Claves'}</button>
-            <button type="button" class="btn sm ghost" data-action="exportar-usuarios-csv">⬇️ Exportar Credenciales CSV</button>
+            <button type="button" class="btn sm ghost" data-action="exportar-usuarios-csv">⬇️ Exportar CSV</button>
             <button class="btn sm primary" data-action="usuario">+ Nuevo usuario</button>
           </div>
         </div>
@@ -933,20 +1199,7 @@
         </div>
         <div class="table-wrap"><table class="table">
           <thead><tr><th>Nombre</th><th>Rol</th><th>Sucursal</th><th>Usuario (Login)</th><th>Contraseña</th><th>Estado</th><th>Acciones</th></tr></thead>
-          <tbody>
-          ${usuariosFiltrados.map((x) => `<tr class="${x.activo ? '' : 'off'}">
-            <td><b>${h(x.nombre)}</b>${x.email ? `<br><small>${h(x.email)}</small>` : ''}</td>
-            <td>${h(C.ROLES[x.rol])}</td>
-            <td>${h(x.sucursal)}</td>
-            <td><code><b>${h(x.username)}</b></code></td>
-            <td><code>${ui.showPasswords ? h(x.password) : '••••••••'}</code></td>
-            <td>${x.activo ? '<span class="badge b-green">Activo</span>' : '<span class="badge b-red">De baja</span>'}</td>
-            <td class="actions">
-              <button class="btn sm ghost" data-action="copiar-cred" data-user="${h(x.username)}" data-pass="${h(x.password)}" data-nombre="${h(x.nombre)}" title="Copiar usuario y contraseña">📋 Copiar</button>
-              <button class="btn sm ghost" data-action="usuario" data-id="${x.id}">Editar / Clave</button>
-              ${x.id === u.id ? '' : `<button class="btn sm ${x.activo ? 'danger' : 'ghost'}" data-action="toggle-usuario" data-id="${x.id}">${x.activo ? 'Dar de baja' : 'Reactivar'}</button>`}
-            </td></tr>`).join('')}
-          </tbody></table></div></div>`;
+          <tbody id="users-tbody">${renderUsuariosRows(usuariosFiltrados, u)}</tbody></table></div></div>`;
     } else if (tab === 'bd') {
       body = vistaBaseDatos();
     } else if (tab === 'csv') {
@@ -989,24 +1242,28 @@
       <small>👤 ${h(x.usuario)} (${h(C.ROLES[x.rol] || x.rol)})</small>${x.detalle ? `<p>${h(x.detalle)}</p>` : ''}</div></li>`).join('')}</ol>`;
   }
 
-  // ---------- modals ----------
+  // ---------- modals & Slide-Over Detail Drawer ----------
   function modalHTML() {
     const m = ui.modal;
     if (!m) return '';
     const u = me();
+    if (!u) { ui.modal = null; return ''; }
     let inner = '';
+    const isDrawer = m.type === 'ver';
+
     if (m.type === 'ver') {
       const p = pro(m.id);
       if (!p || !C.puedeVer(u, p)) { ui.modal = null; return ''; }
       const g = p.gestorId && user(p.gestorId);
       inner = `<h2>${h(p.nombre)}</h2>
-        <div class="actions">${badgeEstado(p.estado)} ${badgeTipoCredito(p.tipoCredito)}</div>
+        <div class="actions" style="margin-bottom:8px">${badgeEstado(p.estado)} ${badgeSLA(p)} ${badgeTipoCredito(p.tipoCredito)}</div>
         <div class="seal">🔒 PROPIEDAD DE PROMOTOR: <b>${h(p.promotor_nombre)}</b> · ${h(p.sucursal)} <em>(No modificable)</em></div>
+        ${accionesCard(p, { inDrawer: true })}
         ${progreso(p)}
         <dl class="facts">
-          <div><dt>Teléfono</dt><dd>${telFmt(p.telefono)}${p.telefonoSecundario ? ' / ' + telFmt(p.telefonoSecundario) : ''}</dd></div>
+          <div><dt>Teléfono</dt><dd class="tel-num">${telFmt(p.telefono)}${p.telefonoSecundario ? ' / ' + telFmt(p.telefonoSecundario) : ''}</dd></div>
           <div><dt>Cédula</dt><dd>${h(p.cedula || '—')}</dd></div>
-          <div><dt>Monto</dt><dd>${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</dd></div>
+          <div><dt>Monto</dt><dd class="money">${money((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto)}</dd></div>
           <div><dt>Negocio</dt><dd>${h((p.cc && p.cc.rubro) || p.negocio || '—')}</dd></div>
           <div><dt>Canal / Plataforma</dt><dd>${h(p.plataforma || 'Cambaceo / Campo')}${p.campana ? ' · ' + h(p.campana) : ''}</dd></div>
           <div><dt>Email Gerencia</dt><dd>${h(p.emailGerente || (S.config.emailsGerentes && S.config.emailsGerentes[p.sucursal]) || '—')}</dd></div>
@@ -1016,8 +1273,8 @@
         </dl>
         ${p.cc && (p.cc.comentarios || p.cc.ultimaGestion) ? `<p class="note cc"><b>📞 Call Center (${h(p.cc.agente)}):</b> ${h(p.cc.comentarios || p.cc.ultimaGestion)}</p>` : ''}
         ${p.gerencia ? `<p class="note ger"><b>🏢 Gerente (${h(p.gerencia.gerente)}):</b> ${h(p.gerencia.instrucciones)}${g ? `<br><b>Gestor de apoyo:</b> ${h(g.nombre)}` : ''}</p>` : ''}
-        <h3>Bitácora inmutable</h3>${timeline(p.historial.slice().reverse())}
-        <form data-form="nota" data-id="${p.id}" class="form inline"><input name="texto" placeholder="Agregar nota a la bitácora…" aria-label="Nota"><button class="btn sm primary">Agregar</button></form>`;
+        <h3>Bitácora inmutable</h3>${timeline((p.historial || []).slice().reverse())}
+        <form data-form="nota" data-id="${p.id}" class="form inline"><input name="texto" placeholder="Agregar nota a la bitácora…" aria-label="Nota"><button class="btn sm primary" type="submit">Agregar</button></form>`;
     } else if (m.type === 'estado') {
       const p = pro(m.id);
       const t = p ? C.transiciones(u, p) : [];
@@ -1025,8 +1282,8 @@
       const sel = t.includes(m.pre) ? m.pre : t[0];
       const gestores = S.usuarios.filter((x) => x.rol === 'gestor' && x.activo).sort((a, b) => (b.sucursal === p.sucursal) - (a.sucursal === p.sucursal));
       inner = `<h2>${u.rol === 'callcenter' ? 'Gestión de llamada' : 'Actualizar prospecto'}</h2>
-        <p><b>${h(p.nombre)}</b> · ${telFmt(p.telefono)} · ${badgeEstado(p.estado)} ${badgeTipoCredito(p.tipoCredito)}</p>${captado(p)}
-        <form class="form" data-form="estado" data-id="${p.id}" data-estado="${sel}">
+        <p><b>${h(p.nombre)}</b> · <span class="tel-num">${telFmt(p.telefono)}</span> · ${badgeEstado(p.estado)} ${badgeTipoCredito(p.tipoCredito)}</p>${originBadge(p, true)}
+        <form class="form" data-form="estado" data-id="${p.id}" data-estado="${sel}" style="margin-top:10px">
           <label>Nuevo estado<select name="estado" data-estado-select>${t.map((e) => `<option value="${e}" ${e === sel ? 'selected' : ''}>${h(est(e))}</option>`).join('')}</select></label>
           <div class="only only-gestion"><label>Resultado de la llamada<textarea name="comentarios_gestion" rows="2" placeholder="Ej. No contestó, volver a llamar mañana"></textarea></label></div>
           <div class="only only-pescado">
@@ -1047,7 +1304,7 @@
             <label>Motivo *<select name="motivo"><option value="">Seleccione…</option>${S.config.motivos.map((x) => `<option>${h(x)}</option>`).join('')}</select></label>
             <label>Comentario<textarea name="comentarios_descarte" rows="2"></textarea></label>
           </div>
-          <button class="btn primary block">Guardar</button>
+          <button class="btn primary block" type="submit">Guardar</button>
         </form>`;
     } else if (m.type === 'editar') {
       const p = pro(m.id);
@@ -1062,11 +1319,11 @@
             <label>Tipo de Crédito<select name="tipoCredito">${tcs.map((t) => `<option ${t === (p.tipoCredito || 'NV(NUEVO)') ? 'selected' : ''}>${h(t)}</option>`).join('')}</select></label>
           </div>
           <div class="cols two">
-            <label>Teléfono<input name="telefono" value="${h(p.telefono)}"></label>
-            <label>Teléfono Secundario<input name="telefonoSecundario" value="${h(p.telefonoSecundario || '')}"></label>
+            <label>Teléfono<input name="telefono" value="${h(p.telefono)}" data-fmt="tel"></label>
+            <label>Teléfono Secundario<input name="telefonoSecundario" value="${h(p.telefonoSecundario || '')}" data-fmt="tel"></label>
           </div>
           <div class="cols two">
-            <label>Cédula<input name="cedula" value="${h(p.cedula)}"></label>
+            <label>Cédula<input name="cedula" value="${h(p.cedula)}" data-fmt="ced"></label>
             <label>Monto<input name="monto" type="number" value="${h(p.monto)}"></label>
           </div>
           <div class="cols two">
@@ -1079,7 +1336,7 @@
             <label>Gestor asignado<select name="gestorId"><option value="">— Ninguno —</option>${S.usuarios.filter((x) => x.rol === 'gestor' && (x.activo || x.id === p.gestorId)).map((x) => `<option value="${x.id}" ${x.id === p.gestorId ? 'selected' : ''}>${h(x.nombre)} (${h(x.sucursal)})${x.activo ? '' : ' [baja]'}</option>`).join('')}</select></label>
           </div>
           <label>Notas<textarea name="notas" rows="2">${h(p.notas)}</textarea></label>
-          <button class="btn primary block">Guardar cambios</button>
+          <button class="btn primary block" type="submit">Guardar cambios</button>
         </form>`;
     } else if (m.type === 'usuario') {
       const x = m.id ? user(m.id) : { nombre: '', rol: 'promotor', sucursal: S.config.sucursales[0], username: '', password: '', email: '' };
@@ -1095,7 +1352,7 @@
             <label>Contraseña <small>(mín. 4 caracteres)</small><input name="password" value="${h(x.password || '')}" placeholder="ej: clave123"></label>
           </div>
           <label>Correo electrónico <small>(opcional)</small><input name="email" type="email" value="${h(x.email || '')}" placeholder="usuario@alfacreditsa.com"></label>
-          <button class="btn primary block">Guardar</button>
+          <button class="btn primary block" type="submit">Guardar</button>
         </form>`;
     } else if (m.type === 'mi-clave') {
       inner = `<h2>🔑 Cambiar mi contraseña</h2>
@@ -1105,51 +1362,148 @@
           <label>Nueva contraseña * <small>(mínimo 4 caracteres)</small><input name="passwordNueva" type="text" required minlength="4" placeholder="Escribe tu nueva contraseña"></label>
           <button class="btn primary block" type="submit">Actualizar contraseña</button>
         </form>`;
+    } else if (m.type === 'sonido') {
+      const muted = SND.isMuted();
+      const cues = SND.ROLE_CUES[u.rol] || ['notify', 'error'];
+      inner = `<h2>🎵 Preferencias de Sonido y Vibración</h2>
+        <p class="hint">Sonoridad diseñada para tu rol: <b>${h(C.ROLES[u.rol])}</b>. Usa tonos armónicos suaves de Web Audio API + vibración táctil en móvil.</p>
+        <div class="row" style="margin-bottom:10px">
+          <span>Estado del audio: <b>${muted ? '🔇 Silenciado' : '🔊 Activo'}</b></span>
+          <button type="button" class="btn sm ${muted ? 'primary' : 'ghost'}" data-action="toggle-sound">${muted ? '🔊 Activar sonido' : '🔇 Silenciar'}</button>
+        </div>
+        <div class="sound-list">
+          ${cues.map((key) => {
+            const info = SND.CUES[key];
+            return info ? `<div class="sound-row">
+              <span><b>${h(info.label)}</b></span>
+              <button type="button" class="btn sm ghost" data-action="test-sound" data-cue="${h(key)}">▶️ Probar</button>
+            </div>` : '';
+          }).join('')}
+        </div>`;
     }
-    return `<div class="modal-bg" data-action="cerrar-modal"><div class="modal" role="dialog" aria-modal="true" data-stop>
+    return `<div class="modal-bg ${isDrawer ? 'drawer-bg' : ''}" data-action="cerrar-modal"><div class="modal ${isDrawer ? 'drawer' : ''}" role="dialog" aria-modal="true" data-stop>
       <button class="x" data-action="cerrar-modal" aria-label="Cerrar">×</button>${inner}</div></div>`;
+  }
+
+  // ---------- Mobile Bottom Navigation + FAB ----------
+  function renderMobileNav(u) {
+    const holder = $('#mobile-nav');
+    if (!holder) return;
+    if (!ui.autenticado || !u) { holder.innerHTML = ''; return; }
+    let key = '', items = [], fab = null;
+    if (u.rol === 'promotor') {
+      key = 'pro';
+      const cur = tabActual('pro', 'mis');
+      const mios = C.visibles(S, u);
+      const gan = mios.filter((p) => p.estado === 'desembolsado').length;
+      items = [
+        ['mis', '📋', 'Mis Leads', mios.length],
+        ['nuevo', '➕', 'Registrar'],
+        ['csv', '📥', 'CSV'],
+        ['ganados', '🏆', 'Ganados', gan],
+      ];
+      if (cur !== 'nuevo') fab = { key: 'pro', val: 'nuevo', label: '+ Nuevo' };
+    } else if (u.rol === 'callcenter') {
+      key = 'cc';
+      const cur = tabActual('cc', 'bandeja');
+      const cola = C.visibles(S, u).filter((p) => p.estado === 'nuevo' || p.estado === 'gestion').length;
+      items = [
+        ['bandeja', '📞', 'Bandeja', cola],
+        ['captura', '📝', 'Capturar'],
+        ['csv', '📥', 'CSV'],
+      ];
+      if (cur !== 'captura') fab = { key: 'cc', val: 'captura', label: '+ Capturar' };
+    } else if (u.rol === 'gerente') {
+      key = 'ger';
+      const mios = C.visibles(S, u);
+      items = [
+        ['pescados', '🐟', 'Pescados', mios.filter((p) => p.estado === 'pescado').length],
+        ['seguimiento', '📌', 'Seguim.', mios.filter((p) => p.estado === 'seguimiento').length],
+        ['todos', '📊', 'Pipeline'],
+        ['equipo', '👥', 'Equipo'],
+      ];
+    } else if (u.rol === 'gestor') {
+      key = 'ges';
+      const mios = C.visibles(S, u);
+      items = [
+        ['act', '📋', 'Evaluar', mios.filter((p) => p.estado === 'seguimiento').length],
+        ['todos', '🕒', 'Historial', mios.length],
+      ];
+    } else if (u.rol === 'admin') {
+      key = 'adm';
+      items = [
+        ['metricas', '📊', 'Métricas'],
+        ['prospectos', '📋', 'Leads', S.prospectos.length],
+        ['usuarios', '👥', 'Usuarios'],
+        ['bd', '🗄️', 'Turso BD'],
+        ['config', '⚙️', 'Config'],
+      ];
+    }
+    const cur = tabActual(key, items[0] ? items[0][0] : '');
+    holder.innerHTML = `
+      ${fab ? `<button type="button" class="fab" data-action="tab" data-key="${fab.key}" data-val="${fab.val}">${h(fab.label)}</button>` : ''}
+      <nav class="mobile-nav" aria-label="Navegación rápida">
+        ${items.map(([v, ico, lbl, cnt]) => `<button type="button" class="${cur === v ? 'on' : ''}" data-action="tab" data-key="${key}" data-val="${v}">
+          <span class="m-ico">${ico}</span><span>${h(lbl)}</span>${cnt ? `<span class="m-badge">${cnt > 99 ? '99+' : cnt}</span>` : ''}
+        </button>`).join('')}
+      </nav>`;
   }
 
   // ---------- render ----------
   function render() {
-    ensureUser();
-    const u = me();
-    const mis = ui.autenticado ? S.notificaciones.filter((n) => n.userId === u.id).sort((a, b) => b.ts.localeCompare(a.ts)) : [];
+    const u = ui.autenticado ? me() : null;
+    if (ui.autenticado && !u) {
+      // Waiting for initial /api/state or invalid cached user
+      $('#topbar').innerHTML = `<div class="brand"><img src="icon.svg" alt="" width="30" height="30"><div><b>AlfaTrack</b></div></div>`;
+      $('#app').innerHTML = vistaLogin();
+      renderMobileNav(null);
+      $('#modal').innerHTML = '';
+      return;
+    }
+    const mis = u ? (S.notificaciones || []).filter((n) => n.userId === u.id).sort((a, b) => b.ts.localeCompare(a.ts)) : [];
     const sinLeer = mis.filter((n) => !n.leida).length;
+    const muted = SND.isMuted();
+
     $('#topbar').innerHTML = `
       <div class="brand">
-        <img src="icon.svg" alt="" width="32" height="32">
+        <img src="icon.svg" alt="" width="30" height="30">
         <div>
           <b>AlfaTrack <span class="cloud-dot" title="${ui.db.tursoConnected ? 'Conectado a Turso Cloud SQLite' : 'Modo Local'}">${ui.db.tursoConnected ? '🟢' : '🟡'}</span></b>
-          <small>Control y Seguimiento de Prospectos · AlfaCredit S.A.</small>
+          <small>Control y Seguimiento · AlfaCredit S.A.</small>
         </div>
       </div>
-      ${ui.autenticado ? `
+      ${u ? `
         <div class="top-session">
           <span class="badge b-green">${h(C.ROLES[u.rol])}</span>
           <b>${h(u.nombre)}</b>
           <small>(${h(u.sucursal)})</small>
         </div>
-        <div class="top-actions">
-          <button class="btn sm ghost top-btn" data-action="mi-clave" title="Cambiar mi contraseña">🔑 Clave</button>
-          <button class="btn sm ghost top-btn" data-action="logout" title="Cerrar sesión (${h(u.username)})">🚪 Salir</button>
+      ` : ''}
+      <div class="top-actions">
+        <button class="icon-btn" data-action="toggle-theme" title="${ui.theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}" aria-label="Cambiar tema">${ui.theme === 'dark' ? '☀️' : '🌙'}</button>
+        ${u ? `
+          <button class="icon-btn" data-action="toggle-sound" title="${muted ? 'Activar sonidos' : 'Silenciar sonidos'}" aria-label="Alternar sonido">${muted ? '🔇' : '🔊'}</button>
+          <button class="icon-btn" data-action="sound-prefs" title="Probar sonidos por rol" aria-label="Preferencias de sonido">🎵</button>
+          <button class="btn sm ghost top-btn" data-action="mi-clave" title="Cambiar mi contraseña">🔑<span class="lbl"> Clave</span></button>
+          <button class="btn sm ghost top-btn" data-action="logout" title="Cerrar sesión (${h(u.username)})">🚪<span class="lbl"> Salir</span></button>
           <div class="bell-wrap">
             <button class="bell" data-action="bell" aria-label="Notificaciones (${sinLeer} sin leer)" aria-expanded="${ui.bell}">🔔${sinLeer ? `<span class="count">${sinLeer > 99 ? '99+' : sinLeer}</span>` : ''}</button>
             ${ui.bell ? `<div class="bell-panel"><div class="row"><b>Notificaciones</b>${sinLeer ? '<button class="link" data-action="leer-todas">Marcar todas leídas</button>' : ''}</div>
               ${mis.length ? `<ul>${mis.slice(0, 50).map((n) => `<li class="${n.leida ? '' : 'unread'}" data-action="notif" data-id="${n.id}"><p>${h(n.texto)}</p><time>${fecha(n.ts)}</time></li>`).join('')}</ul>` : '<p class="empty">Sin notificaciones.</p>'}</div>` : ''}
           </div>
-        </div>
-      ` : ''}`;
+        ` : ''}
+      </div>`;
 
-    if (!ui.autenticado) {
+    if (!u) {
       $('#app').innerHTML = vistaLogin();
     } else {
       const vistas = { promotor: vistaPromotor, callcenter: vistaCallCenter, gerente: vistaGerente, gestor: vistaGestor, admin: vistaAdmin };
       $('#app').innerHTML = `<div class="who">
         <span>${h(C.ROLES[u.rol])} · <b>${h(u.nombre)}</b> (<code>${h(u.username)}</code>) · ${h(u.sucursal)}</span>
-        <small>${ui.db.tursoConnected ? '☁️ Sincronizado con Turso Cloud SQLite' : '💾 Guardado Local'}${ui.db.lastSync ? ' · ' + ui.db.lastSync : ''}</small>
+        <small>${ui.db.tursoConnected ? '☁️ Turso Cloud' : '💾 Local'}${ui.db.lastSync ? ' · ' + ui.db.lastSync : ''}</small>
       </div>` + vistas[u.rol](u);
     }
+    renderMobileNav(u);
     $('#modal').innerHTML = modalHTML();
     document.body.classList.toggle('no-scroll', !!ui.modal);
     toastPendientes();
@@ -1157,9 +1511,86 @@
 
   const refrescarLista = () => {
     const el = $('#list');
-    if (!el) return;
-    el.innerHTML = tablaHTML(filtrar(me().rol === 'admin' ? S.prospectos : C.visibles(S, me())));
+    const u = me();
+    if (!el || !u) return;
+    const base = u.rol === 'admin' ? S.prospectos : C.visibles(S, u);
+    const items = u.rol === 'gerente' ? base : filtrar(base);
+    el.innerHTML = prospectosViewHTML(items, u.rol === 'gerente' ? { sello: true } : {});
   };
+
+  const refrescarProLista = () => {
+    const el = $('#pro-list');
+    const u = me();
+    if (!el || !u) return;
+    const filtradosMios = filtrarPromotor(u);
+    el.innerHTML = lista(filtradosMios, {}, ui.proSearch ? 'Sin coincidencias para tu búsqueda.' : 'Aún no has registrado prospectos. Toca "+ Registrar".');
+  };
+
+  const refrescarUsuarios = () => {
+    const tbody = $('#users-tbody');
+    const cnt = $('#users-count');
+    const u = me();
+    if (!tbody || !u) return;
+    const filtrados = filtrarUsuarios();
+    tbody.innerHTML = renderUsuariosRows(filtrados, u);
+    if (cnt) cnt.textContent = String(filtrados.length);
+  };
+
+  // ---------- live duplicate & smart field feedback ----------
+  function setFormDupState(form, dupMsg) {
+    if (!form) return;
+    const box = form.querySelector('#dup-alert') || $('#dup-alert');
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (box) {
+      box.hidden = !dupMsg;
+      box.textContent = dupMsg ? '⚠️ ' + dupMsg : '';
+    }
+    if (submitBtn) submitBtn.disabled = Boolean(dupMsg);
+    if (dupMsg) {
+      if (lastDupAlertKey !== dupMsg) {
+        lastDupAlertKey = dupMsg;
+        SND.play('error');
+      }
+    } else {
+      lastDupAlertKey = '';
+    }
+  }
+
+  async function runDuplicateCheck(form) {
+    if (!form) return;
+    const telRaw = form.telefono ? form.telefono.value : '';
+    const cedRaw = form.cedula ? form.cedula.value : '';
+    const telOk = C.validarTelefono(telRaw) ? telRaw : '';
+    const cedOk = C.normCedula(cedRaw).length === 14 ? cedRaw : '';
+    if (!telOk && !cedOk) {
+      setFormDupState(form, '');
+      return;
+    }
+    const localDup = C.buscarDuplicado(S, telOk, cedOk);
+    if (localDup) {
+      setFormDupState(form, C.mensajeDuplicado(localDup));
+      return;
+    }
+    if (!isHttp() || !ui.token) {
+      setFormDupState(form, '');
+      return;
+    }
+    const seq = ++dupCheckSeq;
+    try {
+      const qs = new URLSearchParams();
+      if (telOk) qs.set('telefono', telOk);
+      if (cedOk) qs.set('cedula', cedOk);
+      const { res, data } = await apiFetch('/api/check-dup?' + qs.toString(), { method: 'GET' });
+      if (seq !== dupCheckSeq) return;
+      if (res.ok && data && data.ok && data.duplicate) {
+        setFormDupState(form, data.duplicate.mensaje);
+      } else {
+        setFormDupState(form, '');
+      }
+    } catch {
+      if (seq === dupCheckSeq) setFormDupState(form, '');
+    }
+  }
 
   // ---------- events ----------
   document.addEventListener('click', async (e) => {
@@ -1173,25 +1604,54 @@
     const { action, id } = el.dataset;
     const u = me();
     switch (action) {
+      case 'toggle-theme':
+        applyTheme(ui.theme === 'dark' ? 'light' : 'dark');
+        render();
+        break;
+      case 'toggle-sound': {
+        const nowMuted = SND.toggleMute();
+        if (!nowMuted) SND.play('call_saved', { force: true });
+        render();
+        toast(nowMuted ? '🔇 Sonidos silenciados.' : '🔊 Sonidos activados.', 'info');
+        break;
+      }
+      case 'sound-prefs':
+        ui.modal = { type: 'sonido' };
+        render();
+        break;
+      case 'test-sound':
+        SND.play(el.dataset.cue, { force: true });
+        break;
+      case 'view-mode':
+        ui.viewMode = el.dataset.val;
+        try { localStorage.setItem(VIEW_KEY, ui.viewMode); } catch {}
+        render();
+        break;
       case 'tab':
         ui.tab[el.dataset.key] = el.dataset.val;
         if (el.dataset.key === 'adm' && el.dataset.val === 'bd' && !ui.db.stats) fetchDbStats();
         render();
         break;
       case 'bell': ui.bell = !ui.bell; render(); break;
-      case 'leer-todas': C.marcarLeidas(S, u.id); save(); render(); break;
+      case 'leer-todas':
+        await mutate('marcarLeidas', {}, () => C.marcarLeidas(S, u.id), null, { soundCue: 'call_saved' });
+        break;
       case 'notif': {
         const n = S.notificaciones.find((x) => x.id === id);
-        C.marcarLeidas(S, u.id, id); save(); ui.bell = false;
-        if (n && n.prospectoId && C.puedeVer(u, pro(n.prospectoId))) ui.modal = { type: 'ver', id: n.prospectoId };
-        render(); break;
+        ui.bell = false;
+        await mutate('marcarLeidas', { id }, () => C.marcarLeidas(S, u.id, id), null, { soundCue: 'call_saved' });
+        if (n && n.prospectoId && C.puedeVer(u, pro(n.prospectoId))) {
+          ui.modal = { type: 'ver', id: n.prospectoId };
+          render();
+        }
+        break;
       }
       case 'ver': e.preventDefault(); ui.modal = { type: 'ver', id }; render(); break;
       case 'estado': ui.modal = { type: 'estado', id, pre: el.dataset.pre }; render(); break;
       case 'editar': ui.modal = { type: 'editar', id }; render(); break;
       case 'usuario': ui.modal = { type: 'usuario', id }; render(); break;
       case 'mi-clave': ui.modal = { type: 'mi-clave' }; render(); break;
-      case 'logout': logoutSession(); toast('Sesión cerrada correctamente.', 'info'); break;
+      case 'logout': logoutSession(false); break;
       case 'toggle-login-pwd': {
         const inp = $('#login-password');
         if (inp) {
@@ -1211,7 +1671,7 @@
         break;
       }
       case 'exportar-usuarios-csv': {
-        const rows = S.usuarios.map((x) => [x.nombre, C.ROLES[x.rol], x.sucursal, x.username, x.password, x.email || '', x.activo ? 'ACTIVO' : 'DE BAJA']);
+        const rows = S.usuarios.map((x) => [x.nombre, C.ROLES[x.rol], x.sucursal, x.username, x.password || '', x.email || '', x.activo ? 'ACTIVO' : 'DE BAJA']);
         downloadCSV('Credenciales_Usuarios_AlfaTrack.csv', ['Nombre Completo', 'Rol', 'Sucursal', 'Usuario', 'Contraseña', 'Email', 'Estado'], rows);
         toast('Archivo CSV de usuarios y contraseñas descargado.', 'ok');
         break;
@@ -1247,7 +1707,7 @@
       }
       case 'csv-procesar': {
         ui.csv.filas = parseCSVText(ui.csv.rawText);
-        if (!ui.csv.filas.length) { toast('Pegue o seleccione un archivo CSV con datos.', 'error'); break; }
+        if (!ui.csv.filas.length) { toast('Pegue o seleccione un archivo CSV con datos.', 'error'); SND.play('error'); break; }
         ui.csv.clasif = C.clasificarFilasCSV(S, ui.csv.filas, { promotorDefault: u.rol === 'promotor' ? u : null, sucursal: u.rol === 'promotor' ? u.sucursal : '', recuperarEspeciales: true });
         ui.csv.tab = 'validos';
         render();
@@ -1260,11 +1720,18 @@
         break;
       case 'csv-importar': {
         if (!ui.csv.filas.length) break;
-        const r = C.importarFilasCSV(S, u, ui.csv.filas, { recuperarEspeciales: true });
-        if (r.ok) {
-          ui.csv.clasif = C.clasificarFilasCSV(S, ui.csv.filas, { promotorDefault: u.rol === 'promotor' ? u : null, sucursal: u.rol === 'promotor' ? u.sucursal : '', recuperarEspeciales: true });
-          commit(r, `✅ Se importaron ${r.importados.length} prospectos válidos con Candado de Origen.`);
-        } else toast(r.error, 'error');
+        el.disabled = true;
+        await mutate(
+          'importarFilasCSV',
+          { filas: ui.csv.filas, opts: { recuperarEspeciales: true } },
+          () => C.importarFilasCSV(S, u, ui.csv.filas, { recuperarEspeciales: true }),
+          (r) => `✅ Se importaron ${(r.importados || []).length} prospectos válidos con Candado de Origen.`,
+          {
+            onSuccess: (r) => {
+              ui.csv.clasif = (r && r.clasificacion) || C.clasificarFilasCSV(S, ui.csv.filas, { promotorDefault: u.rol === 'promotor' ? u : null, sucursal: u.rol === 'promotor' ? u.sucursal : '', recuperarEspeciales: true });
+            },
+          }
+        );
         break;
       }
       case 'csv-exportar-tab': {
@@ -1277,8 +1744,9 @@
       }
       case 'db-sync-now': {
         toast('Sincronizando con Turso Cloud SQLite…', 'info');
-        await syncToCloud();
+        await pullFromCloud(true, false);
         await fetchDbStats();
+        SND.play('admin_ok');
         toast('Base de datos sincronizada con Turso Cloud SQLite.', 'ok');
         break;
       }
@@ -1295,38 +1763,51 @@
         break;
       case 'db-download-json':
         downloadJSON(`Respaldo_AlfaTrack_${new Date().toISOString().slice(0, 10)}.json`, S);
+        SND.play('admin_ok');
         toast('Respaldo completo JSON descargado.', 'ok');
         break;
       case 'db-restore-backup': {
         if (!confirm('¿Restaurar la base de datos a este punto de respaldo?')) break;
         try {
-          const res = await fetch('/api/db/backup', {
+          const { res, data } = await apiFetch('/api/db/backup', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ actorId: u.id, action: 'restore', backupId: id }),
+            body: JSON.stringify({ action: 'restore', backupId: id }),
           });
-          const data = await res.json();
-          if (data.ok && data.state) {
-            S = upgradeLocalState(data.state);
+          if (res.ok && data.ok && data.state) {
+            S = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
             saveLocal();
+            snapshotKnown(S);
             ui.db.stats = data.stats;
+            SND.play('admin_ok');
             toast('Base de datos restaurada con éxito.', 'ok');
             render();
-          } else toast(data.error || 'No se pudo restaurar.', 'error');
-        } catch (err) { toast('Error al restaurar respaldo.', 'error'); }
+          } else {
+            SND.play('admin_warn');
+            toast((data && data.error) || 'No se pudo restaurar.', 'error');
+          }
+        } catch {
+          SND.play('admin_warn');
+          toast('Error al restaurar respaldo.', 'error');
+        }
         break;
       }
       case 'cerrar-modal': ui.modal = null; render(); break;
       case 'toggle-usuario': {
         const x = user(id);
-        if (x && (!x.activo || confirm(`¿Dar de baja a ${x.nombre}? Sus prospectos conservan el candado de origen.`))) commit(C.toggleUsuario(S, u, id), 'Usuario actualizado.');
+        if (x && (!x.activo || confirm(`¿Dar de baja a ${x.nombre}? Sus prospectos conservan el candado de origen.`))) {
+          await mutate('toggleUsuario', { id }, () => C.toggleUsuario(S, u, id), 'Usuario actualizado.');
+        }
         break;
       }
       case 'qf': ui.f.estado = el.dataset.val; render(); break;
       case 'pf': ui.proFilter = el.dataset.val; render(); break;
       case 'limpiar-filtros': ui.f = { sucursal: '', estado: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' }; render(); break;
       case 'reset':
-        if (confirm('Esto restablece la base de datos inicial. ¿Continuar?')) { S = C.seed(); save(); ui.modal = null; toast('Base de datos restablecida.', 'ok'); render(); }
+        if (confirm('Esto restablece la base de datos inicial. ¿Continuar?')) {
+          await mutate('reset', {}, () => { S = C.seed(); return { ok: true }; }, 'Base de datos restablecida.', {
+            onSuccess: () => { ui.modal = null; },
+          });
+        }
         break;
     }
   });
@@ -1361,13 +1842,36 @@
           const st = parsed.state || parsed;
           if (!st || !Array.isArray(st.usuarios) || !Array.isArray(st.prospectos)) {
             toast('El archivo JSON no es un respaldo válido de AlfaTrack.', 'error');
+            SND.play('admin_warn');
             return;
           }
-          S = upgradeLocalState(st);
-          save();
-          toast('Base de datos importada y sincronizada con Turso Cloud.', 'ok');
-          render();
-        } catch { toast('Archivo JSON inválido.', 'error'); }
+          if (isHttp()) {
+            const { res, data } = await apiFetch('/api/db/backup', {
+              method: 'POST',
+              body: JSON.stringify({ action: 'import', state: st }),
+            });
+            if (res.ok && data.ok && data.state) {
+              S = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
+              saveLocal();
+              snapshotKnown(S);
+              ui.db.stats = data.stats;
+              SND.play('admin_ok');
+              toast('Base de datos importada y sincronizada con Turso Cloud.', 'ok');
+              render();
+            } else {
+              SND.play('admin_warn');
+              toast((data && data.error) || 'Error al importar JSON.', 'error');
+            }
+          } else {
+            S = C.upgradeState(st);
+            saveLocal();
+            toast('Base de datos importada localmente.', 'ok');
+            render();
+          }
+        } catch {
+          SND.play('admin_warn');
+          toast('Archivo JSON inválido.', 'error');
+        }
       };
       reader.readAsText(t.files[0], 'UTF-8');
     }
@@ -1375,17 +1879,53 @@
 
   document.addEventListener('input', (e) => {
     const t = e.target;
-    if (t.form && t.form.dataset.form === 'filtros' && t.name === 'q') { ui.f.q = t.value; refrescarLista(); }
-    else if (t.dataset.input === 'user-search') { ui.userSearch = t.value; render(); $('#app [data-input="user-search"]')?.focus(); }
-    else if (t.dataset.input === 'csv-text') { ui.csv.rawText = t.value; }
-    if (t.matches('[data-dup]')) {
-      const f = t.form;
-      const d = C.buscarDuplicado(S, C.validarTelefono(f.telefono.value) ? f.telefono.value : '', f.cedula && C.normCedula(f.cedula.value).length === 14 ? f.cedula.value : '');
-      const box = f.querySelector('#dup-alert') || $('#dup-alert');
-      if (box) {
-        box.hidden = !d;
-        box.textContent = d ? '⚠️ ' + C.mensajeDuplicado(d) : '';
+    if (t.form && t.form.dataset.form === 'filtros' && t.name === 'q') {
+      ui.f.q = t.value;
+      refrescarLista();
+      return;
+    }
+    if (t.dataset.input === 'pro-search') {
+      ui.proSearch = t.value;
+      refrescarProLista();
+      return;
+    }
+    if (t.dataset.input === 'user-search') {
+      ui.userSearch = t.value;
+      refrescarUsuarios();
+      return;
+    }
+    if (t.dataset.input === 'csv-text') {
+      ui.csv.rawText = t.value;
+      return;
+    }
+
+    // Smart ergonomic formatting & live inline counters
+    if (t.dataset.fmt === 'tel') {
+      const formatted = telFmt(t.value);
+      if (t.value !== formatted) t.value = formatted;
+      if (t.name === 'telefono') {
+        const digits = C.soloDigitos(t.value).length;
+        const st = t.form && t.form.querySelector('#tel-status');
+        if (st) {
+          if (digits === 8) { st.textContent = '✓ 8 dígitos'; st.className = 'field-status ok'; t.classList.add('input-ok'); t.classList.remove('input-err'); }
+          else if (digits > 0) { st.textContent = `${digits}/8 dígitos`; st.className = 'field-status warn'; t.classList.remove('input-ok'); }
+          else { st.textContent = '0/8 dígitos'; st.className = 'field-status'; t.classList.remove('input-ok', 'input-err'); }
+        }
       }
+    }
+    if (t.dataset.fmt === 'ced') {
+      const formatted = cedFmt(t.value);
+      if (t.value !== formatted) t.value = formatted;
+      const len = C.normCedula(t.value).length;
+      const st = t.form && t.form.querySelector('#ced-status');
+      if (st) {
+        if (!len) { st.textContent = ''; st.className = 'field-status'; t.classList.remove('input-ok', 'input-err'); }
+        else if (len === 14) { st.textContent = '✓ 14 caracteres'; st.className = 'field-status ok'; t.classList.add('input-ok'); t.classList.remove('input-err'); }
+        else { st.textContent = `${len}/14`; st.className = 'field-status warn'; t.classList.remove('input-ok'); }
+      }
+    }
+    if (t.matches('[data-dup]')) {
+      runDuplicateCheck(t.form);
     }
   });
 
@@ -1398,47 +1938,96 @@
     const u = me();
 
     if (kind === 'login') {
-      const r = C.autenticar(S, d.username, d.password);
-      if (!r.ok) { toast(r.error, 'error'); return; }
-      setAuthenticatedSession(r.usuario);
-      if (isDbManagerUrl() && r.usuario.rol === 'admin') {
-        ui.tab.adm = 'bd';
-        fetchDbStats();
+      setFormBusy(f, true, 'Verificando…');
+      try {
+        if (isHttp()) {
+          const { res, data } = await apiFetch('/api/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ username: d.username, password: d.password }),
+          });
+          if (!res.ok || !data || !data.ok) {
+            SND.play('error');
+            toast((data && data.error) || 'Usuario o contraseña incorrectos.', 'error');
+            setFormBusy(f, false);
+            return;
+          }
+          setAuthenticatedSession(data.usuario, data.token, data.state, data.rev);
+          if (isDbManagerUrl() && data.usuario.rol === 'admin') {
+            ui.tab.adm = 'bd';
+            fetchDbStats();
+          }
+          SND.play(data.usuario.rol === 'admin' ? 'admin_ok' : 'prospect_created');
+          toast(`Bienvenido(a), ${data.usuario.nombre} (${C.ROLES[data.usuario.rol]}).`, 'ok');
+          render();
+          return;
+        }
+        const r = C.autenticar(S, d.username, d.password);
+        if (!r.ok) { SND.play('error'); toast(r.error, 'error'); setFormBusy(f, false); return; }
+        setAuthenticatedSession(r.usuario, null, S, 1);
+        toast(`Bienvenido(a), ${r.usuario.nombre} (${C.ROLES[r.usuario.rol]}).`, 'ok');
+        render();
+      } catch {
+        SND.play('error');
+        toast('Error de conexión al iniciar sesión.', 'error');
+        setFormBusy(f, false);
       }
-      save();
-      toast(`Bienvenido(a), ${r.usuario.nombre} (${C.ROLES[r.usuario.rol]}).`, 'ok');
-      render();
       return;
     }
 
     if (kind === 'mi-clave') {
-      const r = C.cambiarPassword(S, u, u.id, d.passwordActual, d.passwordNueva);
-      if (r.ok) ui.modal = null;
-      commit(r, 'Tu contraseña ha sido actualizada en la base de datos.');
+      setFormBusy(f, true, 'Actualizando…');
+      const r = await mutate(
+        'cambiarPassword',
+        { targetUserId: u.id, passwordActual: d.passwordActual, passwordNueva: d.passwordNueva },
+        () => C.cambiarPassword(S, u, u.id, d.passwordActual, d.passwordNueva),
+        'Tu contraseña ha sido actualizada en la base de datos.',
+        { onSuccess: () => { ui.modal = null; } }
+      );
+      if (!r.ok) setFormBusy(f, false);
       return;
     }
 
     if (kind === 'nuevo') {
-      const r = C.crearProspecto(S, u, d);
+      setFormBusy(f, true, 'Guardando…');
+      const r = await mutate(
+        'crearProspecto',
+        d,
+        () => C.crearProspecto(S, u, d),
+        (res) => `Prospecto ${res.prospecto.nombre} registrado. Ya está en la cola de Call Center.`,
+        {
+          soundCue: 'prospect_created',
+          onSuccess: () => { ui.tab.pro = 'mis'; },
+        }
+      );
       if (!r.ok) {
-        toast(r.error, 'error');
+        setFormBusy(f, false);
         const box = f.querySelector('#dup-alert') || $('#dup-alert');
         if (box) { box.hidden = false; box.textContent = '⚠️ ' + r.error; }
-        return;
       }
-      ui.tab.pro = 'mis';
-      commit(r, `Prospecto ${r.prospecto.nombre} registrado. Ya está en la cola de Call Center.`);
-    } else if (kind === 'captura-cc') {
-      const r = C.capturarProspectoCallCenter(S, u, d);
+      return;
+    }
+
+    if (kind === 'captura-cc') {
+      setFormBusy(f, true, 'Guardando…');
+      const r = await mutate(
+        'capturarProspectoCallCenter',
+        d,
+        () => C.capturarProspectoCallCenter(S, u, d),
+        (res) => `Prospecto ${res.prospecto.nombre} registrado con Candado de Origen (${res.prospecto.promotor_nombre}).`,
+        {
+          soundCue: 'call_saved',
+          onSuccess: () => { ui.tab.cc = 'bandeja'; },
+        }
+      );
       if (!r.ok) {
-        toast(r.error, 'error');
+        setFormBusy(f, false);
         const box = f.querySelector('#dup-alert') || $('#dup-alert');
         if (box) { box.hidden = false; box.textContent = '⚠️ ' + r.error; }
-        return;
       }
-      ui.tab.cc = 'bandeja';
-      commit(r, `Prospecto ${r.prospecto.nombre} registrado con Candado de Origen (${r.prospecto.promotor_nombre}).`);
-    } else if (kind === 'estado') {
+      return;
+    }
+
+    if (kind === 'estado') {
       const estado = d.estado;
       const datos = {
         gestion: { comentarios: d.comentarios_gestion },
@@ -1447,93 +2036,181 @@
         desembolsado: { monto: d.monto_desembolso },
         descartado: { motivo: d.motivo, comentarios: d.comentarios_descarte },
       }[estado] || {};
-      const r = C.cambiarEstado(S, u, f.dataset.id, estado, datos);
-      if (r.ok) ui.modal = null;
-      const avisos = r.ok && r.notificaciones.length ? ` Se notificó a: ${[...new Set(r.notificaciones.map((n) => user(n.userId).nombre))].join(', ')}.` : '';
-      commit(r, `Guardado: ${est(estado)}.${avisos}`);
-    } else if (kind === 'nota') {
-      if (commit(C.agregarNota(S, u, f.dataset.id, d.texto), 'Nota agregada a la bitácora.')) ui.modal = { type: 'ver', id: f.dataset.id };
-      render();
-    } else if (kind === 'editar') {
-      const r = C.adminEditarProspecto(S, u, f.dataset.id, d);
-      if (r.ok) ui.modal = null;
-      commit(r, r.sinCambios ? 'Sin cambios.' : 'Prospecto actualizado (registrado en bitácora).');
-    } else if (kind === 'usuario') {
-      const r = C.guardarUsuario(S, u, Object.assign(d, { id: f.dataset.id || undefined }));
-      if (r.ok) ui.modal = null;
-      commit(r, r.ok ? `Usuario guardado (${r.usuario.username} / ${r.usuario.password}).` : '');
-    } else if (kind === 'config') {
+      const cue = estado === 'desembolsado' ? 'desembolsado' : estado === 'pescado' ? 'pescado' : u.rol === 'callcenter' ? 'call_saved' : 'prospect_created';
+      setFormBusy(f, true, 'Guardando…');
+      const r = await mutate(
+        'cambiarEstado',
+        { id: f.dataset.id, estado, datos },
+        () => C.cambiarEstado(S, u, f.dataset.id, estado, datos),
+        (res) => {
+          const notifs = (res && res.notificaciones) || [];
+          const nombres = [...new Set(notifs.map((n) => (user(n.userId) && user(n.userId).nombre) || n.userId))].filter(Boolean);
+          const avisos = nombres.length ? ` Se notificó a: ${nombres.join(', ')}.` : '';
+          return `Guardado: ${est(estado)}.${avisos}`;
+        },
+        { soundCue: cue, onSuccess: () => { ui.modal = null; } }
+      );
+      if (!r.ok) setFormBusy(f, false);
+      return;
+    }
+
+    if (kind === 'nota') {
+      setFormBusy(f, true, 'Guardando…');
+      const r = await mutate(
+        'agregarNota',
+        { id: f.dataset.id, texto: d.texto },
+        () => C.agregarNota(S, u, f.dataset.id, d.texto),
+        'Nota agregada a la bitácora.',
+        { onSuccess: () => { ui.modal = { type: 'ver', id: f.dataset.id }; } }
+      );
+      if (!r.ok) setFormBusy(f, false);
+      return;
+    }
+
+    if (kind === 'editar') {
+      setFormBusy(f, true, 'Guardando…');
+      const r = await mutate(
+        'adminEditarProspecto',
+        { id: f.dataset.id, patch: d },
+        () => C.adminEditarProspecto(S, u, f.dataset.id, d),
+        (res) => (res && res.sinCambios ? 'Sin cambios.' : 'Prospecto actualizado (registrado en bitácora).'),
+        { onSuccess: () => { ui.modal = null; } }
+      );
+      if (!r.ok) setFormBusy(f, false);
+      return;
+    }
+
+    if (kind === 'usuario') {
+      setFormBusy(f, true, 'Guardando…');
+      const payload = Object.assign({}, d, { id: f.dataset.id || undefined });
+      const r = await mutate(
+        'guardarUsuario',
+        payload,
+        () => C.guardarUsuario(S, u, payload),
+        (res) => (res && res.usuario ? `Usuario guardado (${res.usuario.username} / ${res.usuario.password || '••••'}).` : 'Usuario guardado.'),
+        { onSuccess: () => { ui.modal = null; } }
+      );
+      if (!r.ok) setFormBusy(f, false);
+      return;
+    }
+
+    if (kind === 'config') {
       const lines = (s) => String(s || '').split('\n');
       const cfg = JSON.parse(JSON.stringify(S.config));
-      cfg.sucursales = lines(d.sucursales); cfg.motivos = lines(d.motivos); cfg.negocios = lines(d.negocios);
+      cfg.sucursales = lines(d.sucursales);
+      cfg.motivos = lines(d.motivos);
+      cfg.negocios = lines(d.negocios);
       if (d.tiposCredito) cfg.tiposCredito = lines(d.tiposCredito);
       if (d.plataformas) cfg.plataformas = lines(d.plataformas);
       C.ESTADOS.forEach((x) => { cfg.estados[x] = d['estado_' + x]; });
       Object.keys(cfg.plantillas).forEach((k) => { cfg.plantillas[k] = d['tpl_' + k]; });
-      commit(C.guardarConfig(S, u, cfg), 'Configuración guardada.');
-    } else if (kind === 'db-sql') {
+      setFormBusy(f, true, 'Guardando…');
+      const r = await mutate('guardarConfig', { config: cfg }, () => C.guardarConfig(S, u, cfg), 'Configuración guardada.');
+      if (!r.ok) setFormBusy(f, false);
+      return;
+    }
+
+    if (kind === 'db-sql') {
       ui.db.sql = d.sql;
-      const localSqlFallback = (q) => {
-        const str = String(q || '').trim();
-        if (!/^(SELECT|PRAGMA|EXPLAIN)\b/i.test(str) || /\b(DROP|DELETE|UPDATE|INSERT|ALTER)\b/i.test(str)) {
-          return { ok: false, error: 'Solo se permiten consultas SELECT de lectura.' };
+      setFormBusy(f, true, 'Ejecutando…');
+      if (isHttp()) {
+        try {
+          const { res, data } = await apiFetch('/api/db/query', {
+            method: 'POST',
+            body: JSON.stringify({ sql: d.sql }),
+          });
+          // Always show the real HTTP 400/403 error message instead of silently falling back to fake rows
+          if (res.ok && data && data.ok) {
+            ui.db.sqlResult = data;
+            SND.play('admin_ok');
+          } else {
+            ui.db.sqlResult = { ok: false, error: (data && data.error) || `Error SQL (HTTP ${res.status})` };
+            SND.play('admin_warn');
+          }
+        } catch {
+          ui.db.sqlResult = { ok: false, error: 'Error de red al conectar con el servidor SQL.' };
+          SND.play('admin_warn');
         }
-        const m = str.match(/FROM\s+(alfatrack_\w+)/i);
-        const tbl = m ? m[1].toLowerCase() : 'alfatrack_usuarios';
-        const rows = tbl === 'alfatrack_prospectos'
-          ? S.prospectos.map((p) => ({ id: p.id, nombre: p.nombre, telefono: p.telefono, tipo_credito: p.tipoCredito || 'NV(NUEVO)', monto: p.monto, promotor_nombre: p.promotor_nombre, sucursal: p.sucursal, estado: p.estado }))
-          : tbl === 'alfatrack_auditoria'
-            ? S.auditoria.slice(-50)
-            : S.usuarios.map((x) => ({ id: x.id, username: x.username, password: x.password, nombre: x.nombre, rol: x.rol, sucursal: x.sucursal, activo: x.activo ? 1 : 0 }));
-        return { ok: true, columns: rows.length ? Object.keys(rows[0]) : [], rows: rows.slice(0, 100), latencyMs: 1 };
-      };
-      try {
-        const res = await fetch('/api/db/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ actorId: u.id, sql: d.sql }),
-        });
-        if (res.ok) ui.db.sqlResult = await res.json();
-        else ui.db.sqlResult = localSqlFallback(d.sql);
-      } catch (err) {
-        ui.db.sqlResult = localSqlFallback(d.sql);
+      } else {
+        ui.db.sqlResult = { ok: false, error: 'La consola SQL requiere conexión con el servidor.' };
       }
       render();
-    } else if (kind === 'db-backup-create') {
+      return;
+    }
+
+    if (kind === 'db-backup-create') {
+      setFormBusy(f, true, 'Creando…');
       try {
-        await syncToCloud();
-        const res = await fetch('/api/db/backup', {
+        const { res, data } = await apiFetch('/api/db/backup', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ actorId: u.id, action: 'create', nombre: d.nombre }),
+          body: JSON.stringify({ action: 'create', nombre: d.nombre }),
         });
-        const data = await res.json();
-        if (data.ok) {
+        if (res.ok && data.ok) {
           ui.db.stats = data.stats;
+          SND.play('admin_ok');
           toast(`Respaldo "${data.backup.nombre}" creado en Turso Cloud.`, 'ok');
           render();
-        } else toast(data.error || 'Error al crear respaldo.', 'error');
+        } else {
+          SND.play('admin_warn');
+          toast((data && data.error) || 'Error al crear respaldo.', 'error');
+          setFormBusy(f, false);
+        }
       } catch {
+        SND.play('admin_warn');
         toast('Error de conexión al crear respaldo en nube.', 'error');
+        setFormBusy(f, false);
       }
     }
   });
 
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && (ui.modal || ui.bell)) { ui.modal = null; ui.bell = false; render(); } });
-
-  // Real-time sync between open tabs/windows.
-  window.addEventListener('storage', (e) => {
-    if (e.key !== KEY || !e.newValue) return;
-    try { S = upgradeLocalState(JSON.parse(e.newValue)); } catch (err) { return; }
-    const typing = document.activeElement && document.activeElement.closest('form[data-form="nuevo"], .modal form');
-    if (typing) toastPendientes(); else render();
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && (ui.modal || ui.bell)) {
+      ui.modal = null;
+      ui.bell = false;
+      render();
+    }
   });
 
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-    navigator.serviceWorker.register('sw.js?v=6', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+  // Cross-tab instant sync
+  window.addEventListener('storage', (e) => {
+    if (e.key !== KEY || !e.newValue || !ui.autenticado) return;
+    try {
+      const parsed = JSON.parse(e.newValue);
+      S = C.upgradeState(parsed, { scoped: Boolean(parsed._scoped) });
+    } catch { return; }
+    if (isUserTyping()) toastPendientes();
+    else render();
+  });
+
+  // True Cross-Device Real-Time Sync: lightweight polling every 12s when visible + instant sync on focus/visibility
+  setInterval(() => {
+    if (ui.autenticado && document.visibilityState === 'visible' && !ui.busy) {
+      pullFromCloud(false, true);
+    }
+  }, 12000);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && ui.autenticado && !ui.busy) {
+      pullFromCloud(false, true);
+    }
+  });
+
+  window.addEventListener('focus', () => {
+    if (ui.autenticado && !ui.busy) {
+      pullFromCloud(false, true);
+    }
+  });
+
+  if ('serviceWorker' in navigator && isHttp()) {
+    navigator.serviceWorker.register('sw.js?v=7', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
-  if (isDbManagerUrl() && ui.autenticado) fetchDbStats();
+
   render();
-  // Pull latest cloud state if no local edits have started
-  pullFromCloud(false);
+  if (ui.autenticado && ui.token) {
+    pullFromCloud(true, false).then(() => {
+      if (isDbManagerUrl() && me() && me().rol === 'admin') fetchDbStats();
+    });
+  } else {
+    checkHealth();
+  }
 })();

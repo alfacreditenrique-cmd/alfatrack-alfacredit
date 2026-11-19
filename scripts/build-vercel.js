@@ -18,6 +18,7 @@ const staticFiles = [
   'index.html',
   'styles.css',
   'core.js',
+  'sound.js',
   'app.js',
   'icon.svg',
   'manifest.webmanifest',

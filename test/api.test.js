@@ -4,9 +4,10 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 
-// Use isolated local DB file for deterministic API integration tests, plus 1 live Turso test
+// Use isolated local DB file for deterministic API integration tests
 process.env.ALFATRACK_DB_MODE = 'local';
 process.env.ALFATRACK_DB_FILE = path.join(os.tmpdir(), `alfatrack_api_test_${Date.now()}.json`);
+process.env.ALFATRACK_SESSION_SECRET = 'test-hmac-secret-alfatrack-2026';
 
 const { createServer } = require('../server.js');
 const DB = require('../db.js');
@@ -25,25 +26,40 @@ test.after(async () => {
 });
 
 async function api(route, opts = {}) {
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (opts.token) headers.Authorization = 'Bearer ' + opts.token;
   const res = await fetch(baseUrl + route, {
     method: opts.method || (opts.body ? 'POST' : 'GET'),
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json();
-  return { status: res.status, data };
+  return { status: res.status, data, headers: res.headers };
 }
 
-test('GET /api/health and /api/state return initialized database with all real users and passwords', async () => {
+async function login(username, password) {
+  const r = await api('/api/auth/login', { body: { username, password } });
+  assert.strictEqual(r.status, 200, `login failed for ${username}: ${JSON.stringify(r.data)}`);
+  return r.data;
+}
+
+test('GET /api/health returns only safe metadata; unauthenticated /api/state returns 401; static security enforced', async () => {
   const h = await api('/api/health');
   assert.strictEqual(h.status, 200);
-  assert.ok(h.data.ok);
-  assert.ok(h.data.tables.some((t) => t.name === 'alfatrack_usuarios' && t.rows >= 60));
+  assert.strictEqual(h.data.ok, true);
+  assert.strictEqual(h.data.status, 'healthy');
+  assert.ok(h.data.engine);
+  assert.strictEqual(h.data.tables, undefined, 'health must not leak DB table metadata');
+  assert.strictEqual(h.data.backups, undefined, 'health must not leak backup metadata');
 
-  const st = await api('/api/state');
-  assert.strictEqual(st.status, 200);
-  assert.ok(st.data.ok);
-  assert.ok(st.data.state.usuarios.length >= 60);
+  // Unauthenticated or forged token rejected with 401
+  const stUnauth = await api('/api/state');
+  assert.strictEqual(stUnauth.status, 401);
+  const stForged = await api('/api/state', { token: 'at_tok_ZmFrZQ.badsignature' });
+  assert.strictEqual(stForged.status, 401);
+  const mutUnauth = await api('/api/mutate', { body: { action: 'crearProspecto', actorId: 'u-pro-esteli', payload: {} } });
+  assert.strictEqual(mutUnauth.status, 401);
+
   // Dedicated Turso Database Manager routes serve the web application (HTTP 200 HTML)
   for (const dbRoute of ['/turso', '/db', '/gestor-db.html']) {
     const r = await fetch(baseUrl + dbRoute);
@@ -58,7 +74,7 @@ test('GET /api/health and /api/state return initialized database with all real u
   assert.strictEqual(forbiddenMd.status, 403);
 });
 
-test('POST /api/auth/login authenticates admin/admin123 and promoters, rejects invalid credentials', async () => {
+test('POST /api/auth/login signs HMAC-SHA256 tokens and scopes state strictly by role', async () => {
   const bad = await api('/api/auth/login', { body: { username: 'admin', password: 'wrong' } });
   assert.strictEqual(bad.status, 401);
   assert.ok(!bad.data.ok);
@@ -67,21 +83,55 @@ test('POST /api/auth/login authenticates admin/admin123 and promoters, rejects i
   assert.strictEqual(okAdmin.status, 200);
   assert.ok(okAdmin.data.ok);
   assert.ok(okAdmin.data.token.startsWith('at_tok_'));
+  assert.ok(okAdmin.data.token.includes('.'), 'token must carry HMAC signature segment');
   assert.strictEqual(okAdmin.data.usuario.rol, 'admin');
+  assert.ok(okAdmin.data.state.usuarios.length >= 60);
 
+  // Non-admin promoter receives role-scoped state: NO passwords, NO other promoters' prospects, NO audit log
   const okPro = await api('/api/auth/login', { body: { username: 'laura.varela', password: 'laura123' } });
   assert.strictEqual(okPro.status, 200);
   assert.strictEqual(okPro.data.usuario.nombre, 'Laura Varela');
-  assert.strictEqual(okPro.data.usuario.sucursal, 'Managua');
+  assert.strictEqual(okPro.data.usuario.password, undefined, 'must not expose password to non-admin');
+  assert.strictEqual(okPro.data.usuario.passwordHash, undefined, 'must not expose passwordHash to non-admin');
+  assert.ok(okPro.data.state.usuarios.every((u) => u.password === undefined && u.passwordHash === undefined), 'no user passwords leaked to promoter');
+  assert.ok(okPro.data.state.prospectos.every((p) => p.promotor_origen_id === okPro.data.usuario.id), 'promoter only sees own prospects');
+  assert.strictEqual(okPro.data.state.auditoria.length, 0, 'promoter does not receive global audit log');
+
+  // Authenticated GET /api/state works with Bearer token and remains scoped
+  const stPro = await api('/api/state', { token: okPro.data.token });
+  assert.strictEqual(stPro.status, 200);
+  assert.ok(stPro.data.state.usuarios.every((u) => u.password === undefined));
+
+  // Authenticated /api/check-dup detects duplicate from another branch without exposing their prospect list
+  const dupRes = await api('/api/check-dup?telefono=88451122', { token: okPro.data.token });
+  assert.strictEqual(dupRes.status, 200);
+  assert.ok(dupRes.data.duplicate && /Carlos Rivera/.test(dupRes.data.duplicate.mensaje));
+  const noDup = await api('/api/check-dup?telefono=89990000', { token: okPro.data.token });
+  assert.strictEqual(noDup.status, 200);
+  assert.strictEqual(noDup.data.duplicate, null);
 });
 
-test('POST /api/auth/password changes password and persists across requests', async () => {
-  const login1 = await api('/api/auth/login', { body: { username: 'betsy.ruiz', password: 'betsy123' } });
-  assert.strictEqual(login1.status, 200);
-  const betsyId = login1.data.usuario.id;
+test('POST /api/auth/password requires signed token, ignores spoofed actorId, and persists scrypt hash', async () => {
+  const betsy = await login('betsy.ruiz', 'betsy123');
+  const admin = await login('admin', 'admin123');
 
+  // Unauthenticated rejected
+  const unauth = await api('/api/auth/password', {
+    body: { actorId: 'u-admin', targetUserId: betsy.usuario.id, passwordNueva: 'hacked123' },
+  });
+  assert.strictEqual(unauth.status, 401);
+
+  // Betsy cannot spoof actorId='u-admin' to reset admin password
+  const spoof = await api('/api/auth/password', {
+    token: betsy.token,
+    body: { actorId: 'u-admin', targetUserId: 'u-admin', passwordActual: '', passwordNueva: 'hacked123' },
+  });
+  assert.strictEqual(spoof.status, 400);
+
+  // Betsy changes own password legitimately
   const chg = await api('/api/auth/password', {
-    body: { actorId: betsyId, targetUserId: betsyId, passwordActual: 'betsy123', passwordNueva: 'betsy2026' },
+    token: betsy.token,
+    body: { targetUserId: betsy.usuario.id, passwordActual: 'betsy123', passwordNueva: 'betsy2026' },
   });
   assert.strictEqual(chg.status, 200);
   assert.ok(chg.data.ok);
@@ -94,16 +144,26 @@ test('POST /api/auth/password changes password and persists across requests', as
 
   // Admin resets it back to betsy123
   const rst = await api('/api/auth/password', {
-    body: { actorId: 'u-admin', targetUserId: betsyId, passwordActual: '', passwordNueva: 'betsy123' },
+    token: admin.token,
+    body: { targetUserId: betsy.usuario.id, passwordActual: '', passwordNueva: 'betsy123' },
   });
   assert.strictEqual(rst.status, 200);
 });
 
-test('POST /api/mutate creates prospects, imports CSVs, and manages users in DB', async () => {
+test('POST /api/mutate creates prospects with token identity, imports CSVs, and restricts /api/sync to admin', async () => {
+  const laura = await login('laura.varela', 'laura123');
+  const betsy = await login('betsy.ruiz', 'betsy123');
+
+  // Non-admin blocked from /api/sync
+  const syncDenied = await api('/api/sync', { token: laura.token, body: { state: { usuarios: [] } } });
+  assert.strictEqual(syncDenied.status, 403);
+
+  // Even if spoofed actorId is passed, server locks origin to authenticated token (Laura Varela)
   const m1 = await api('/api/mutate', {
+    token: laura.token,
     body: {
       action: 'crearProspecto',
-      actorId: 'u-pro-mga-laura',
+      actorId: 'u-pro-esteli',
       payload: {
         nombre: 'Cliente API Managua',
         telefono: '8555-4433',
@@ -117,11 +177,12 @@ test('POST /api/mutate creates prospects, imports CSVs, and manages users in DB'
   });
   assert.strictEqual(m1.status, 200);
   assert.strictEqual(m1.data.result.prospecto.promotor_nombre, 'Laura Varela');
+  assert.strictEqual(m1.data.result.prospecto.promotor_origen_id, laura.usuario.id);
 
   const csvImp = await api('/api/mutate', {
+    token: betsy.token,
     body: {
       action: 'importarFilasCSV',
-      actorId: 'u-cc-betsy',
       payload: {
         filas: [
           { Cliente: 'Cliente CSV Esteli', Telefono: '86667788', Promotor: 'Cristell Calderon', VALOR: '25000', Negocio: 'Taller' },
@@ -134,53 +195,73 @@ test('POST /api/mutate creates prospects, imports CSVs, and manages users in DB'
   assert.strictEqual(csvImp.data.result.importados[0].promotor_nombre, 'Cristell Massiel Calderón Osorio');
 });
 
-test('Database manager API: table explorer, safe SQL console, and backup create/restore', async () => {
-  // Non-admin or unauthenticated rejected from table explorer
-  const unauthTbl = await api('/api/db/table?name=alfatrack_usuarios&limit=10');
-  assert.strictEqual(unauthTbl.status, 403);
-  const nonAdminTbl = await api('/api/db/table?name=alfatrack_usuarios&limit=10&actorId=u-pro-esteli');
-  assert.strictEqual(nonAdminTbl.status, 403);
+test('Database manager API: strict auth + admin-only enforcement, real SQL errors, and backup create/restore', async () => {
+  const admin = await login('admin', 'admin123');
+  const carlos = await login('carlos.rivera', 'carlos123');
 
-  const tbl = await api('/api/db/table?name=alfatrack_usuarios&limit=10&actorId=u-admin');
+  // Unauthenticated -> 401; non-admin -> 403
+  assert.strictEqual((await api('/api/db/stats')).status, 401);
+  assert.strictEqual((await api('/api/db/stats', { token: carlos.token })).status, 403);
+  assert.strictEqual((await api('/api/db/table?name=alfatrack_usuarios&limit=10')).status, 401);
+  assert.strictEqual((await api('/api/db/table?name=alfatrack_usuarios&limit=10', { token: carlos.token })).status, 403);
+
+  const stats = await api('/api/db/stats', { token: admin.token });
+  assert.strictEqual(stats.status, 200);
+  assert.ok(stats.data.tables.some((t) => t.name === 'alfatrack_usuarios' && t.rows >= 60));
+
+  const tbl = await api('/api/db/table?name=alfatrack_usuarios&limit=10', { token: admin.token });
   assert.strictEqual(tbl.status, 200);
   assert.ok(tbl.data.ok);
   assert.strictEqual(tbl.data.rows.length, 10);
 
   // Non-admin rejected from SQL console
   const unauthSql = await api('/api/db/query', {
-    body: { actorId: 'u-pro-esteli', sql: 'SELECT * FROM alfatrack_usuarios' },
+    token: carlos.token,
+    body: { sql: 'SELECT * FROM alfatrack_usuarios' },
   });
   assert.strictEqual(unauthSql.status, 403);
 
-  // Destructive SQL blocked even for admin
+  // Destructive SQL blocked even for admin with explicit error message
   const dropSql = await api('/api/db/query', {
-    body: { actorId: 'u-admin', sql: 'DROP TABLE alfatrack_usuarios' },
+    token: admin.token,
+    body: { sql: 'DROP TABLE alfatrack_usuarios' },
   });
   assert.strictEqual(dropSql.status, 400);
+  assert.match(dropSql.data.error, /lectura/i);
+
+  // Invalid table name returns 400 error instead of silent fallback rows
+  const badTblSql = await api('/api/db/query', {
+    token: admin.token,
+    body: { sql: 'SELECT * FROM tabla_inexistente' },
+  });
+  assert.strictEqual(badTblSql.status, 400);
 
   // Read-only SELECT succeeds for admin
   const okSql = await api('/api/db/query', {
-    body: { actorId: 'u-admin', sql: 'SELECT username, rol, sucursal FROM alfatrack_usuarios LIMIT 5' },
+    token: admin.token,
+    body: { sql: 'SELECT username, rol, sucursal FROM alfatrack_usuarios LIMIT 5' },
   });
   assert.strictEqual(okSql.status, 200);
   assert.ok(okSql.data.rows.length >= 5);
 
   // Create backup and restore
   const bk = await api('/api/db/backup', {
-    body: { actorId: 'u-admin', action: 'create', nombre: 'Backup Test API' },
+    token: admin.token,
+    body: { action: 'create', nombre: 'Backup Test API' },
   });
   assert.strictEqual(bk.status, 200);
   assert.ok(bk.data.backup.id);
 
   const rst = await api('/api/db/backup', {
-    body: { actorId: 'u-admin', action: 'restore', backupId: bk.data.backup.id },
+    token: admin.token,
+    body: { action: 'restore', backupId: bk.data.backup.id },
   });
   assert.strictEqual(rst.status, 200);
   assert.ok(rst.data.ok);
 });
 
 test('upgradeState migrates legacy pre-v2 official promoters once and preserves subsequent admin edits', async () => {
-  // 1. Legacy state (without officialPromotersV2 flag) gets migrated to official names & usernames
+  const admin = await login('admin', 'admin123');
   const legacy = DB.upgradeState({
     version: 1,
     usuarios: [
@@ -200,11 +281,10 @@ test('upgradeState migrates legacy pre-v2 official promoters once and preserves 
   assert.strictEqual(aracely.username, 'aracely.juarez');
   assert.strictEqual(legacy.prospectos[0].promotor_nombre, 'Maria Jose Lopez Wilson');
 
-  // 2. Subsequent Admin edits to an official promoter via /api/mutate guardarUsuario are preserved across saveState/upgradeState
   const editRes = await api('/api/mutate', {
+    token: admin.token,
     body: {
       action: 'guardarUsuario',
-      actorId: 'u-admin',
       payload: {
         id: 'u-pro-mas-fanny',
         nombre: 'FANNY DEL CARMEN RAMÍREZ LÓPEZ',
@@ -222,9 +302,9 @@ test('upgradeState migrates legacy pre-v2 official promoters once and preserves 
 
   // Revert back to Masaya / fanny123
   await api('/api/mutate', {
+    token: admin.token,
     body: {
       action: 'guardarUsuario',
-      actorId: 'u-admin',
       payload: {
         id: 'u-pro-mas-fanny',
         nombre: 'FANNY DEL CARMEN RAMÍREZ LÓPEZ',
@@ -237,26 +317,30 @@ test('upgradeState migrates legacy pre-v2 official promoters once and preserves 
   });
 });
 
-test('POST /api/mutate handles concurrent requests without lost updates', async () => {
+test('POST /api/mutate handles concurrent requests from two promoters without lost updates', async () => {
+  const carlos = await login('carlos.rivera', 'carlos123');
+  const maria = await login('maria.lopez', 'maria123');
+  const admin = await login('admin', 'admin123');
+
   const [r1, r2] = await Promise.all([
     api('/api/mutate', {
+      token: carlos.token,
       body: {
         action: 'crearProspecto',
-        actorId: 'u-pro-esteli',
         payload: { nombre: 'Concurrente Uno', telefono: '8111-0001', negocio: 'Pulpería', monto: 10000 },
       },
     }),
     api('/api/mutate', {
+      token: maria.token,
       body: {
         action: 'crearProspecto',
-        actorId: 'u-pro-managua',
         payload: { nombre: 'Concurrente Dos', telefono: '8111-0002', negocio: 'Taller', monto: 12000 },
       },
     }),
   ]);
   assert.strictEqual(r1.status, 200);
   assert.strictEqual(r2.status, 200);
-  const st = await api('/api/state');
+  const st = await api('/api/state', { token: admin.token });
   assert.ok(st.data.state.prospectos.some((p) => p.nombre === 'Concurrente Uno'));
   assert.ok(st.data.state.prospectos.some((p) => p.nombre === 'Concurrente Dos'));
 });

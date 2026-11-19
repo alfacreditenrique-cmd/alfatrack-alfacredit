@@ -329,3 +329,39 @@ test('CSV Depurador & Bulk Promoter Form Importer: classifies phones, resolves p
   assert.strictEqual(C.resolverPromotorCSV(s, 'María José López Wilson').nombre, 'Maria Jose Lopez Wilson');
 });
 
+test('scrypt password hashing: per-user random salt, timingSafeEqual verify, and seamless migration on login', () => {
+  const s = fresh();
+  const admin = U(s, 'u-admin');
+  // Seeded user initially uses fast hash; autenticar upgrades to scrypt$salt$derived
+  const r = C.autenticar(s, 'admin', 'admin123');
+  assert.ok(r.ok);
+  assert.ok(admin.passwordHash.startsWith('scrypt$'), `expected scrypt hash, got ${admin.passwordHash}`);
+  assert.strictEqual(admin.passwordHash.split('$').length, 3);
+  assert.ok(C.verifyPwd(admin, 'admin123'));
+  assert.ok(!C.verifyPwd(admin, 'admin124'));
+  assert.ok(!C.autenticar(s, 'admin', 'wrong').ok);
+
+  // Two users with the same password get distinct salts & hashes
+  const h1 = C.hashPwdScrypt('samepass123');
+  const h2 = C.hashPwdScrypt('samepass123');
+  assert.notStrictEqual(h1, h2);
+  assert.ok(C.verifyPwd({ passwordHash: h1 }, 'samepass123'));
+  assert.ok(C.verifyPwd({ passwordHash: h2 }, 'samepass123'));
+});
+
+test('Core.upgradeState preserves scoped mode without re-injecting secrets or hidden prospects', () => {
+  const scoped = C.upgradeState({
+    version: 1,
+    _scoped: true,
+    usuarios: [{ id: 'u-pro-esteli', username: 'carlos.rivera', nombre: 'Carlos Rivera', rol: 'promotor', sucursal: 'Estelí', activo: true }],
+    prospectos: [],
+    notificaciones: [],
+    auditoria: [],
+  }, { scoped: true });
+  assert.strictEqual(scoped.usuarios.length, 1);
+  assert.strictEqual(scoped.usuarios[0].password, undefined);
+  assert.strictEqual(scoped.usuarios[0].passwordHash, undefined);
+  assert.strictEqual(scoped.prospectos.length, 0);
+});
+
+

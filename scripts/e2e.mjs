@@ -1,5 +1,5 @@
 // End-to-end smoke test: drives the real UI in headless Chrome via CDP (no deps).
-// Usage: start a static server on :8765 (python -m http.server 8765), then: node scripts/e2e.mjs
+// Usage: node scripts/e2e.mjs   (or APP_URL=https://... node scripts/e2e.mjs)
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,7 @@ let localSrv = null;
 let targetUrl = URL_APP;
 if (!targetUrl) {
   process.env.ALFATRACK_DB_MODE = process.env.ALFATRACK_DB_MODE || 'local';
+  process.env.ALFATRACK_DB_FILE = join(tmpdir(), `alfatrack_e2e_${Date.now()}.json`);
   const mod = await import('../server.js');
   localSrv = mod.createServer();
   await new Promise((r) => localSrv.listen(0, '127.0.0.1', r));
@@ -29,29 +30,40 @@ function send(method, params = {}) {
 }
 async function ev(expr) {
   const r = await send('Runtime.evaluate', { expression: `(async()=>{${expr}})()`, awaitPromise: true, returnByValue: true });
-  if (r.exceptionDetails) throw new Error('eval failed: ' + JSON.stringify(r.exceptionDetails).slice(0, 500));
+  if (r.exceptionDetails) throw new Error('eval failed: ' + JSON.stringify(r.exceptionDetails).slice(0, 600));
   return r.result.value;
 }
 async function shot(name, w, hgt, mobile) {
   await send('Emulation.setDeviceMetricsOverride', { width: w, height: hgt, deviceScaleFactor: 1, mobile });
-  await sleep(300);
+  await sleep(250);
   const { data } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   mkdirSync('scripts/shots', { recursive: true });
   writeFileSync(`scripts/shots/${name}.png`, Buffer.from(data, 'base64'));
 }
 
-// in-page helpers
+// in-page async helpers
 const H = `
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const waitFor=async(fn, timeout=8000)=>{
+  const t0=Date.now();
+  while(Date.now()-t0<timeout){
+    const v=fn();
+    if(v) return v;
+    await new Promise(r=>setTimeout(r,60));
+  }
+  throw new Error('waitFor timeout: '+fn.toString());
+};
 const set=(el,v)=>{el.value=v; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));};
 const click=(sel,txt)=>{const el=$$(sel).find(e=>!txt||e.textContent.includes(txt)); if(!el) throw new Error('no '+sel+' '+txt); el.click(); return el;};
-const loginAs=(u,p)=>{
-  if($('[data-action=logout]')) $('[data-action=logout]').click();
+const loginAs=async(u,p)=>{
+  if($('[data-action=logout]')) { $('[data-action=logout]').click(); await waitFor(()=>$('form[data-form=login]')); }
   const lf=$('form[data-form=login]');
   if(!lf) throw new Error('Login form not visible');
   set(lf.username,u); set(lf.password,p); lf.requestSubmit();
+  await waitFor(()=>$('[data-action=logout]') && $('.who'));
+  await new Promise(r=>setTimeout(r,80));
 };
-const cardOf=n=>$$('#app .card, #app tr').find(c=>c.textContent.includes(n));
+const cardOf=n=>$$('#app .card, #app tr, #app .kanban-card').find(c=>c.textContent.includes(n));
 const toasts=()=>$$('#toasts .toast').map(t=>t.textContent);
 `;
 
@@ -70,14 +82,14 @@ try {
   });
   await send('Runtime.enable'); await send('Page.enable');
   await send('Page.navigate', { url: targetUrl }); await sleep(1200);
-  await ev(`localStorage.clear(); location.reload();`).catch(() => {}); await sleep(1500);
+  await ev(`localStorage.clear(); location.reload();`).catch(() => {}); await sleep(1200);
 
-  // dialogs (confirm) auto-accept
+  // auto-accept confirm dialogs
   ws.addEventListener('message', (m) => { const d = JSON.parse(m.data); if (d.method === 'Page.javascriptDialogOpening') send('Page.handleJavaScriptDialog', { accept: true }); });
 
   await shot('01-login-clean', 390, 844, true);
 
-  // 0. Verify clean login screen: no credentials table, no quick-login buttons, no #sel-rol/#sel-user demo switcher, and password visibility toggle preserves typed inputs
+  // 0. Clean login screen: no credentials leaked, password toggle preserves input
   let r = await ev(H + `
     const lf = $('form[data-form=login]');
     set(lf.username, 'admin');
@@ -102,138 +114,190 @@ try {
   assert.ok(r.hasLoginForm && !r.hasSelRol && !r.hasSelUser && !r.hasQuickLogin && r.hasCredTable === 0 && r.preservedAfterShow && r.preservedAfterHide, JSON.stringify(r));
   assert.ok(!/admin123|Directorio Oficial de Usuarios/i.test(r.bodyTxt), 'No credentials leaked on login screen');
 
-  // 1. Official Promotor (Fanny Ramírez — Masaya: fanny.ramirez / fanny123) logs in and registers; duplicate is blocked
+  // 1. Official Promotor (fanny.ramirez) logs in: signed token, live phone formatting, live /api/check-dup disables submit, registers prospect, promoter search bar works without focus loss
   r = await ev(H + `
-    loginAs('fanny.ramirez', 'fanny123');
-    const noDemoSwitch = !$('#sel-rol') && !$('#sel-user');
+    await loginAs('fanny.ramirez', 'fanny123');
+    const tok = localStorage.getItem('alfatrack_token') || '';
+    const hasMobileNav = !!$('.mobile-nav');
+    const hasFab = !!$('.fab');
     click('.tabs button','Registrar');
     const f=$('form[data-form=nuevo]');
-    set(f.nombre,'Prueba E2E Cliente'); set(f.telefono,'8845-1122');
-    const dupShown=!$('#dup-alert').hidden && $('#dup-alert').textContent;
-    f.requestSubmit(); const stillForm=!!$('form[data-form=nuevo]');
-    set(f.telefono,'8222-3333'); const dupCleared=$('#dup-alert').hidden;
+    set(f.nombre,'Prueba E2E Cliente');
+    set(f.telefono,'88451122');
+    const formattedTel = f.telefono.value;
+    const telStatus = $('#tel-status')?.textContent;
+    await waitFor(() => !$('#dup-alert').hidden && $('#dup-alert').textContent.includes('Carlos Rivera'));
+    const dupShown = $('#dup-alert').textContent;
+    const submitDisabledOnDup = f.querySelector('button[type=submit]').disabled;
+    set(f.telefono,'82223333');
+    await waitFor(() => $('#dup-alert').hidden && !f.querySelector('button[type=submit]').disabled);
+    const dupCleared = $('#dup-alert').hidden;
     set(f.negocio,'Taller'); set(f.monto,'12000'); f.requestSubmit();
-    return {noDemoSwitch, dupShown, stillForm, dupCleared, card: !!cardOf('Prueba E2E Cliente'), t: toasts()};`);
-  assert.ok(r.noDemoSwitch, 'no demo switcher after login');
-  assert.match(r.dupShown, /Carlos Rivera/, 'duplicate alert names original promotor');
-  assert.ok(r.stillForm && r.dupCleared && r.card, JSON.stringify(r));
+    await waitFor(() => !!cardOf('Prueba E2E Cliente'));
+    // Test Promoter search bar without focus loss
+    const ps = $('[data-input=pro-search]');
+    ps.focus();
+    set(ps, 'Prueba E2E');
+    const focusKept = document.activeElement === ps;
+    const foundBySearch = !!cardOf('Prueba E2E Cliente');
+    set(ps, '');
+    return {
+      signedTok: tok.startsWith('at_tok_') && tok.includes('.'),
+      hasMobileNav, hasFab, formattedTel, telStatus, dupShown, submitDisabledOnDup, dupCleared,
+      focusKept, foundBySearch, card: !!cardOf('Prueba E2E Cliente'), t: toasts()
+    };`);
+  assert.ok(r.signedTok && r.hasMobileNav && r.hasFab, JSON.stringify(r));
+  assert.strictEqual(r.formattedTel, '8845-1122');
+  assert.match(r.telStatus, /8 dígitos/);
+  assert.match(r.dupShown, /Carlos Rivera/);
+  assert.ok(r.submitDisabledOnDup && r.dupCleared && r.focusKept && r.foundBySearch && r.card, JSON.stringify(r));
   await shot('01-promotor-mobile', 390, 844, true);
 
-  // 2. Call Center (karla.mendoza / karla123) logs in and qualifies it
-  await shot('02-cc-desktop-before', 1280, 900, false);
+  // 2. Call Center (karla.mendoza): View Switcher (Tabla / Kanban with C$ totals & SLA badges) + qualify to pescado
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   r = await ev(H + `
-    loginAs('karla.mendoza', 'karla123');
-    const row=cardOf('Prueba E2E Cliente'); row.querySelector('[data-action=estado]').click();
+    await loginAs('karla.mendoza', 'karla123');
+    // Switch to Kanban board and verify pipeline columns + totals + SLA badges
+    click('[data-action=view-mode]', 'Kanban');
+    const kanbanCols = $$('.kanban-col').length;
+    const kanbanHasTotals = $$('.kanban-total').every(el => el.textContent.includes('C$'));
+    const hasSlaBadge = $$('.sla').length > 0;
+    // Switch back to Tabla and qualify prospect
+    click('[data-action=view-mode]', 'Tabla');
+    const row = cardOf('Prueba E2E Cliente');
+    row.querySelector('[data-action=estado]').click();
     const f=$('form[data-form=estado]'); set(f.estado,'pescado');
     const visible=getComputedStyle(f.querySelector('.only-pescado')).display!=='none';
     set(f.comentarios_pescado,'Cumple requisitos'); set(f.direccionVisita,'Masaya centro'); f.requestSubmit();
-    return {visible, modal: !!$('.modal'), badge: cardOf('Prueba E2E Cliente').textContent, t: toasts()};`);
-  assert.ok(r.visible && !r.modal, JSON.stringify(r));
+    await waitFor(() => !$('.modal') && cardOf('Prueba E2E Cliente')?.textContent.includes('Pescado'));
+    return { kanbanCols, kanbanHasTotals, hasSlaBadge, visible, badge: cardOf('Prueba E2E Cliente').textContent, t: toasts() };`);
+  assert.ok(r.kanbanCols === 6 && r.kanbanHasTotals && r.hasSlaBadge && r.visible, JSON.stringify(r));
   assert.match(r.badge, /Pescado/);
   assert.ok(r.t.some((x) => /Se notificó a: .*FANNY DEL CARMEN RAMÍREZ LÓPEZ/.test(x) && /Patricia Aguirre/.test(x)), JSON.stringify(r.t));
   await shot('03-cc-desktop', 1280, 900, false);
-  await shot('03b-cc-mobile', 390, 844, true);
 
-  // 3. Promotor (fanny.ramirez) logs in and sees bell + toast
-  r = await ev(H + `loginAs('fanny.ramirez', 'fanny123'); return {count: $('.bell .count')?.textContent, t: toasts()};`);
+  // 3. Promotor (fanny.ramirez) logs in and sees bell + notification toast
+  r = await ev(H + `
+    await loginAs('fanny.ramirez', 'fanny123');
+    return { count: $('.bell .count')?.textContent, t: toasts() };`);
   assert.ok(Number(r.count) >= 1, JSON.stringify(r));
   assert.ok(r.t.some((x) => x.includes('¡Atención! Call Center ya calificó a tu cliente Prueba E2E Cliente y fue enviado a tu Gerente de Sucursal')), JSON.stringify(r.t));
   await shot('04-promotor-toast', 390, 844, true);
 
-  // 4. Gerente Masaya (gerente.masaya / masaya123) logs in and assigns follow-up with a gestor
+  // 4. Gerente Masaya assigns follow-up with Gestor
   r = await ev(H + `
-    loginAs('gerente.masaya', 'masaya123');
+    await loginAs('gerente.masaya', 'masaya123');
     const c=cardOf('Prueba E2E Cliente'); const seal=c.textContent.includes('PROPIEDAD DE PROMOTOR: FANNY DEL CARMEN RAMÍREZ LÓPEZ');
     c.querySelector('[data-pre=seguimiento]').click();
     const f=$('form[data-form=estado]'); set(f.gestorId,'u-ges-masaya'); set(f.instrucciones,'Visitar el lunes'); f.requestSubmit();
+    await waitFor(() => !$('.modal'));
     click('.tabs button','En seguimiento');
-    return {seal, ok: !!cardOf('Prueba E2E Cliente'), txt: cardOf('Prueba E2E Cliente')?.textContent};`);
+    await waitFor(() => !!cardOf('Prueba E2E Cliente'));
+    return { seal, ok: !!cardOf('Prueba E2E Cliente'), txt: cardOf('Prueba E2E Cliente')?.textContent };`);
   assert.ok(r.seal && r.ok && /Ernesto Vílchez/.test(r.txt) && /Visitar el lunes/.test(r.txt), JSON.stringify(r));
   await shot('05-gerente', 390, 844, true);
 
-  // 5. Gestor (ernesto.vilchez / ernesto123) logs in and closes it; timeline has all steps
+  // 5. Gestor closes case -> Slide-Over Detail Drawer shows 4 timeline steps
   r = await ev(H + `
-    loginAs('ernesto.vilchez', 'ernesto123');
+    await loginAs('ernesto.vilchez', 'ernesto123');
     cardOf('Prueba E2E Cliente').querySelector('[data-pre=desembolsado]').click();
     $('form[data-form=estado]').requestSubmit();
-    click('.tabs button','Historial'); cardOf('Prueba E2E Cliente').querySelector('[data-action=ver]').click();
-    return $$('.modal .timeline li').length;`);
-  assert.strictEqual(r, 4, 'timeline: created, pescado, seguimiento, desembolsado');
-  await shot('06-timeline', 390, 844, true);
+    await waitFor(() => !$('.modal'));
+    click('.tabs button','Historial');
+    cardOf('Prueba E2E Cliente').querySelector('[data-action=ver]').click();
+    return { isDrawer: !!$('.modal.drawer'), steps: $$('.modal .timeline li').length };`);
+  assert.ok(r.isDrawer && r.steps === 4, JSON.stringify(r));
+  await shot('06-drawer-timeline', 1280, 900, false);
 
-  // 6. Admin (admin / admin123): every tab renders; origin locked in edit; config edit applies
+  // 6. Admin: tabs, user search without focus loss, dark mode, sound prefs modal, origin lock, config edit
   r = await ev(H + `
     document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
-    loginAs('admin', 'admin123');
-    const out={};
+    await loginAs('admin', 'admin123');
+    // Toggle dark mode and verify persistence
+    click('[data-action=toggle-theme]');
+    const darkOn = document.documentElement.dataset.theme === 'dark';
+    click('[data-action=toggle-theme]');
+    const lightBack = !document.documentElement.dataset.theme;
+    // Open sound prefs modal and test sound cue
+    click('[data-action=sound-prefs]');
+    const hasSoundModal = !!$('[data-action=test-sound]');
+    $('[data-action=test-sound]')?.click();
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+    // Verify tabs + user search without focus loss
+    const out = { darkOn, lightBack, hasSoundModal };
     for (const t of ['Métricas','Prospectos','Usuarios','Configuración','Auditoría']) { click('.tabs button',t); out[t]=$('#app').textContent.length; }
     click('.tabs button','Configuración');
     const f=$('form[data-form=config]'); f.estado_nuevo.value='Nuevo (Cola CC)'; f.requestSubmit();
+    await waitFor(() => toasts().some(x => x.includes('Configuración guardada')));
     click('.tabs button','Prospectos');
     out.label=$('#app').textContent.includes('Nuevo (Cola CC)');
     cardOf('Prueba E2E Cliente').querySelector('[data-action=editar]').click();
     out.lock=$('.modal').textContent.includes('Candado de Origen');
     const e=$('form[data-form=editar]'); set(e.nombre,'Prueba E2E Editado'); e.requestSubmit();
+    await waitFor(() => !$('.modal') && !!cardOf('Prueba E2E Editado'));
     out.edited=!!cardOf('Prueba E2E Editado');
-    click('.tabs button','Usuarios'); click('[data-action=usuario]','Nuevo usuario');
+    click('.tabs button','Usuarios');
+    const us = $('[data-input=user-search]');
+    us.focus(); set(us, 'fanny');
+    out.userSearchKeptFocus = document.activeElement === us && $('#users-tbody').textContent.includes('fanny.ramirez');
+    set(us, '');
+    click('[data-action=usuario]','Nuevo usuario');
     const u=$('form[data-form=usuario]'); set(u.nombre,'Promotor Nuevo'); set(u.sucursal,'León'); u.requestSubmit();
+    await waitFor(() => !$('.modal') && $('#app').textContent.includes('Promotor Nuevo'));
     out.user=$('#app').textContent.includes('Promotor Nuevo');
     click('.tabs button','Métricas');
     return out;`);
-  assert.ok(r.label && r.lock && r.edited && r.user, JSON.stringify(r));
+  assert.ok(r.darkOn && r.lightBack && r.hasSoundModal && r.label && r.lock && r.edited && r.userSearchKeptFocus && r.user, JSON.stringify(r));
   await shot('07-admin-desktop', 1280, 900, false);
 
-  // 7. Logout -> Clean Login Screen -> Wrong password blocked -> Login as admin/admin123 -> DB Manager & CSV Depurador
-  r = await ev(H + `
-    click('[data-action=logout]');
-    const onLogin = !!$('form[data-form=login]');
-    const dirRows = $$('.login-wrap table tbody tr').length;
-    const lf = $('form[data-form=login]');
-    set(lf.username, 'admin'); set(lf.password, 'badpass'); lf.requestSubmit();
-    const stillLogin = !!$('form[data-form=login]');
-    set(lf.username, 'admin'); set(lf.password, 'admin123'); lf.requestSubmit();
-    const loggedAdmin = !!($$('.tabs button').find(b => b.textContent.includes('Base de Datos')));
-    return { onLogin, dirRows, stillLogin, loggedAdmin };`);
-  assert.ok(r.onLogin && r.dirRows === 0 && r.stillLogin && r.loggedAdmin, JSON.stringify(r));
-
-  // 8. Admin Database Manager (SQL Console + Table Explorer + Backup) & CSV Depurador
+  // 7. Admin DB Manager: real HTTP 400 SQL error displayed (no silent fake fallback!) + valid SELECT + CSV Depurador
   r = await ev(H + `
     click('.tabs button', 'Base de Datos');
     click('[data-action=db-ver-tabla]', 'Explorar tabla');
-    for (let i = 0; i < 20 && !$('#app').textContent.includes('Explorador de Tabla SQL'); i++) await new Promise(r => setTimeout(r, 150));
-    const hasTable = $('#app').textContent.includes('Explorador de Tabla SQL');
+    await waitFor(() => $('#app').textContent.includes('Explorador de Tabla SQL'));
+    const hasTable = true;
+    // Test invalid/destructive SQL displays real server error
     const sqlForm = $('form[data-form=db-sql]');
-    set(sqlForm.sql, 'SELECT username, rol, sucursal FROM alfatrack_usuarios LIMIT 5');
+    set(sqlForm.sql, 'DROP TABLE alfatrack_usuarios');
     sqlForm.requestSubmit();
-    for (let i = 0; i < 20 && !$('#app').textContent.includes('Consulta ejecutada'); i++) await new Promise(r => setTimeout(r, 150));
-    const hasSqlRes = $('#app').textContent.includes('Consulta ejecutada');
+    await waitFor(() => $('#app .alert')?.textContent.includes('lectura'));
+    const realSqlError = $('#app .alert').textContent;
+    // Test valid SELECT
+    const sqlForm2 = $('form[data-form=db-sql]');
+    set(sqlForm2.sql, 'SELECT username, rol, sucursal FROM alfatrack_usuarios LIMIT 5');
+    sqlForm2.requestSubmit();
+    await waitFor(() => $('#app').textContent.includes('Consulta ejecutada'));
+    const hasSqlRes = true;
+    // CSV Depurador layout + import via /api/mutate
     click('.tabs button', 'Depurador CSV');
+    const hasStyledCsvTa = !!$('.csv-textarea');
     click('[data-action=csv-ejemplo]');
     const beforeCount = $$('#app table tbody tr').length;
     click('[data-action=csv-importar]');
-    return { hasTable, hasSqlRes, beforeCount };`);
-  assert.ok(r.hasTable && r.hasSqlRes && r.beforeCount >= 2, JSON.stringify(r));
+    await waitFor(() => toasts().some(x => x.includes('importaron')));
+    return { hasTable, realSqlError, hasSqlRes, hasStyledCsvTa, beforeCount };`);
+  assert.ok(r.hasTable && /lectura/i.test(r.realSqlError) && r.hasSqlRes && r.hasStyledCsvTa && r.beforeCount >= 2, JSON.stringify(r));
   await shot('08-admin-db-manager', 1280, 900, false);
 
-  // 9. Logout and login as official promoters from the image (Yeiling Muñoz, Maria Jose Lopez Wilson) & Laura Varela -> sees their prospects
+  // 8. Official promoters (Yeiling Muñoz, Maria Jose Lopez Wilson, Laura Varela) see their imported prospects
   r = await ev(H + `
-    loginAs('yeiling.munoz', 'yeiling123');
+    await loginAs('yeiling.munoz', 'yeiling123');
     const seesBismarck = !!cardOf('Bismarck José López');
     const whoYeiling = $('.who')?.textContent;
-    loginAs('maria.lopez', 'maria123');
+    await loginAs('maria.lopez', 'maria123');
     const whoMaria = $('.who')?.textContent;
-    loginAs('laura.varela', 'laura123');
+    await loginAs('laura.varela', 'laura123');
     const seesImported = !!cardOf('Elizabeth Lopez');
     return { seesBismarck, whoYeiling, whoMaria, seesImported, who: $('.who')?.textContent };`);
   assert.ok(r.seesBismarck && /YEILING PATRICIA PÉREZ MUÑOZ/.test(r.whoYeiling) && /Maria Jose Lopez Wilson/.test(r.whoMaria) && r.seesImported && /Laura Varela/.test(r.who), JSON.stringify(r));
   await shot('09-promotora-laura', 390, 844, true);
 
-  // 10. Navigate directly to /turso -> verify Turso Web Database Manager loads directly for Admin without any JWT error
+  // 9. Direct /turso route opens DB Manager for Admin
   const tursoUrl = targetUrl.replace(/\/index\.html$/, '').replace(/\/+$/, '') + '/turso';
-  await send('Page.navigate', { url: tursoUrl }); await sleep(1200);
+  await send('Page.navigate', { url: tursoUrl }); await sleep(1000);
   r = await ev(H + `
-    loginAs('admin', 'admin123');
-    await new Promise(r => setTimeout(r, 400));
+    await loginAs('admin', 'admin123');
+    await waitFor(() => $('#app').textContent.includes('Gestor de Base de Datos en la Nube'));
     return {
       title: $('#app').textContent.includes('Gestor de Base de Datos en la Nube'),
       noRawTursoError: !document.body.textContent.includes('empty JWT token'),

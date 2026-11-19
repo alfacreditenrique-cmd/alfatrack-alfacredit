@@ -1,4 +1,4 @@
-/* AlfaTrack Database Engine: Turso Cloud SQLite (libSQL HTTP v2/pipeline) + Local JSON/SQLite Mirror */
+/* AlfaTrack Database Engine: Turso Cloud SQLite (libSQL HTTP v2/pipeline) + Local JSON Mirror */
 'use strict';
 
 const fs = require('node:fs');
@@ -6,8 +6,31 @@ const path = require('node:path');
 const os = require('node:os');
 const Core = require('./core.js');
 
-const DEFAULT_TURSO_URL = 'https://baseinventario-alfacreditenrique-cmd.aws-us-east-2.turso.io';
-const DEFAULT_TURSO_TOKEN = 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NzYyNjgxODgsImlkIjoiMDE5ZDkxZDMtYTcwMS03ZDYzLWFiM2MtMGFmMjQ4YzI2ZWU4IiwicmlkIjoiZWIxOGNlOTItNjRiOS00OTRjLTgzZWYtMTM0Mzk5ZmExZTBmIn0.Zh4suZn4iXch7sJi_b4W34pPGzd16U9DJwcp_cfbnkH5IWf0gy7LZIeIcw1nyHw6RMoHQQ_MxEZMm9leLMq9CQ';
+// Load .env.local in non-Vercel local environments without overwriting existing process.env vars
+(function loadLocalEnv() {
+  if (process.env.VERCEL) return;
+  const envPath = path.join(__dirname, '.env.local');
+  try {
+    if (!fs.existsSync(envPath)) return;
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let val = trimmed.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  } catch {}
+})();
+
+// shortcut: fallback Turso credentials retained until TURSO_URL/TURSO_AUTH_TOKEN are confirmed set in Vercel project env vars
+const FALLBACK_TURSO_URL = 'https://baseinventario-alfacreditenrique-cmd.aws-us-east-2.turso.io';
+const FALLBACK_TURSO_TOKEN = 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NzYyNjgxODgsImlkIjoiMDE5ZDkxZDMtYTcwMS03ZDYzLWFiM2MtMGFmMjQ4YzI2ZWU4IiwicmlkIjoiZWIxOGNlOTItNjRiOS00OTRjLTgzZWYtMTM0Mzk5ZmExZTBmIn0.Zh4suZn4iXch7sJi_b4W34pPGzd16U9DJwcp_cfbnkH5IWf0gy7LZIeIcw1nyHw6RMoHQQ_MxEZMm9leLMq9CQ';
 
 const ALLOWED_TABLES = [
   'alfatrack_usuarios',
@@ -22,8 +45,8 @@ const ALLOWED_TABLES = [
 function getTursoConfig() {
   const mode = process.env.ALFATRACK_DB_MODE || 'turso';
   if (mode === 'local') return { enabled: false, url: '', token: '' };
-  const rawUrl = (process.env.TURSO_URL || DEFAULT_TURSO_URL).trim().replace(/^libsql:\/\//i, 'https://').replace(/\/+$/, '');
-  const token = (process.env.TURSO_AUTH_TOKEN || DEFAULT_TURSO_TOKEN).trim();
+  const rawUrl = (process.env.TURSO_URL || FALLBACK_TURSO_URL).trim().replace(/^libsql:\/\//i, 'https://').replace(/\/+$/, '');
+  const token = (process.env.TURSO_AUTH_TOKEN || FALLBACK_TURSO_TOKEN).trim();
   return { enabled: Boolean(rawUrl && token), url: rawUrl, token };
 }
 
@@ -62,7 +85,7 @@ async function tursoPipeline(statements) {
   requests.push({ type: 'close' });
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8500);
+  const timer = setTimeout(() => controller.abort(), 9000);
   try {
     const res = await fetch(`${cfg.url}/v2/pipeline`, {
       method: 'POST',
@@ -91,7 +114,7 @@ async function tursoPipeline(statements) {
 }
 
 function parseTursoResult(execResult) {
-  if (!execResult || !execResult.response || !execResult.response.result) return { columns: [], rows: [] };
+  if (!execResult || !execResult.response || !execResult.response.result) return { columns: [], rows: [], affectedRowCount: 0 };
   const r = execResult.response.result;
   const columns = (r.cols || []).map((c) => c.name);
   const rows = (r.rows || []).map((row) => {
@@ -105,7 +128,7 @@ function parseTursoResult(execResult) {
     });
     return obj;
   });
-  return { columns, rows };
+  return { columns, rows, affectedRowCount: Number(r.affected_row_count || 0) };
 }
 
 let schemaInitialized = false;
@@ -198,97 +221,176 @@ async function ensureSchema() {
   return r;
 }
 
-// Upgrade state so any newly added real promoters/agents/passwords or config fields exist
-function upgradeState(s) {
-  if (!s || typeof s !== 'object') return Core.seed();
-  const base = Core.seed();
-  s.version = 1;
-  s.config = Object.assign({}, base.config, s.config || {});
-  s.config.emailsGerentes = Object.assign({}, base.config.emailsGerentes, (s.config && s.config.emailsGerentes) || {});
-  if (!Array.isArray(s.config.tiposCredito) || !s.config.tiposCredito.length) s.config.tiposCredito = base.config.tiposCredito;
-  if (!Array.isArray(s.config.plataformas) || !s.config.plataformas.length) s.config.plataformas = base.config.plataformas;
-
-  s.usuarios = Array.isArray(s.usuarios) ? s.usuarios : [];
-  const byId = new Map(s.usuarios.map((u) => [u.id, u]));
-  const usedUsernames = new Set(s.usuarios.map((u) => (u.username || '').toLowerCase()).filter(Boolean));
-
-  const OFFICIAL_IDS = new Set([
-    'u-pro-managua', 'u-pro-mga-lester', 'u-pro-mga-claudia', 'u-pro-mga-marjorie',
-    'u-pro-mas-fanny', 'u-pro-mas-noelia', 'u-pro-mas-yeiling',
-    'u-pro-jin-nidia', 'u-pro-jui-martha',
-    'u-pro-seb-evelia', 'u-pro-seb-jiurem',
-    'u-pro-leo-araceli', 'u-pro-leo-lorena',
-  ]);
-
-  // Ensure every existing user has username & password, and migrate pre-v2 official promoter records once
-  const needsOfficialMigration = !s.officialPromotersV2;
-  for (const u of s.usuarios) {
-    const seedMatch = base.usuarios.find((bu) => bu.id === u.id);
-    if (needsOfficialMigration && seedMatch && OFFICIAL_IDS.has(u.id)) {
-      usedUsernames.delete((u.username || '').toLowerCase());
-      u.nombre = seedMatch.nombre;
-      u.sucursal = seedMatch.sucursal;
-      u.username = seedMatch.username;
-      usedUsernames.add(u.username);
-    }
-    if (!u.username) {
-      u.username = (seedMatch && !usedUsernames.has(seedMatch.username))
-        ? seedMatch.username
-        : Core.genUsername(u.nombre, usedUsernames);
-      usedUsernames.add(u.username);
-    }
-    if (!u.password) {
-      u.password = (seedMatch && seedMatch.password) || (u.id === 'u-admin' ? 'admin123' : Core.genPassword(u.username));
-    }
-    if (!u.passwordHash) u.passwordHash = Core.hashPwd(u.password);
-    if (u.email === undefined && seedMatch) u.email = seedMatch.email || '';
-  }
-
-  // Merge any missing seed users (all real promoters, agents, managers, credit officers)
-  for (const bu of base.usuarios) {
-    if (!byId.has(bu.id) && !usedUsernames.has(bu.username)) {
-      s.usuarios.push(JSON.parse(JSON.stringify(bu)));
-      byId.set(bu.id, bu);
-      usedUsernames.add(bu.username);
-    }
-  }
-
-  s.prospectos = Array.isArray(s.prospectos) ? s.prospectos : base.prospectos;
-  if (needsOfficialMigration) {
-    s.prospectos.forEach((p) => {
-      const uOrig = byId.get(p.promotor_origen_id);
-      if (uOrig && OFFICIAL_IDS.has(uOrig.id)) p.promotor_nombre = uOrig.nombre;
-    });
-  }
-  s.officialPromotersV2 = true;
-  s.notificaciones = Array.isArray(s.notificaciones) ? s.notificaciones : base.notificaciones;
-  s.auditoria = Array.isArray(s.auditoria) ? s.auditoria : base.auditoria;
-  return s;
-}
+const upgradeState = Core.upgradeState;
 
 function readLocalStore() {
   const fp = getLocalFilePath();
   try {
     if (fs.existsSync(fp)) {
       const raw = JSON.parse(fs.readFileSync(fp, 'utf8'));
-      if (raw && raw.state) return { state: upgradeState(raw.state), backups: raw.backups || [] };
-      if (raw && raw.version === 1) return { state: upgradeState(raw), backups: [] };
+      if (raw && raw.state) return { state: upgradeState(raw.state), backups: raw.backups || [], rev: Number(raw.rev || 1) };
+      if (raw && raw.version === 1) return { state: upgradeState(raw), backups: [], rev: 1 };
     }
   } catch {}
   return null;
 }
 
-function writeLocalStore(state, backups) {
+function writeLocalStore(state, backups, rev) {
   const fp = getLocalFilePath();
-  let existingBackups = backups;
-  if (!existingBackups) {
-    const cur = readLocalStore();
-    existingBackups = (cur && cur.backups) || [];
-  }
+  const cur = readLocalStore();
+  const existingBackups = backups || (cur && cur.backups) || [];
+  const nextRev = rev !== undefined ? rev : ((cur && cur.rev) ? cur.rev + 1 : 1);
   try {
     fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, JSON.stringify({ state, backups: existingBackups, updatedAt: new Date().toISOString() }), 'utf8');
+    fs.writeFileSync(fp, JSON.stringify({ state, backups: existingBackups, rev: nextRev, updatedAt: new Date().toISOString() }), 'utf8');
   } catch {}
+  return nextRev;
+}
+
+function stmtUpsertUsuario(u, ts) {
+  return {
+    sql: `INSERT INTO alfatrack_usuarios (id, username, password, password_hash, nombre, rol, sucursal, email, activo, ultimo_acceso, actualizado)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            username = excluded.username,
+            password = excluded.password,
+            password_hash = excluded.password_hash,
+            nombre = excluded.nombre,
+            rol = excluded.rol,
+            sucursal = excluded.sucursal,
+            email = excluded.email,
+            activo = excluded.activo,
+            ultimo_acceso = excluded.ultimo_acceso,
+            actualizado = excluded.actualizado`,
+    args: [
+      u.id, u.username, u.password || '', u.passwordHash || Core.hashPwd(u.password || ''),
+      u.nombre, u.rol, u.sucursal, u.email || '', u.activo ? 1 : 0,
+      u.ultimoAcceso || null, u.actualizado || ts,
+    ],
+  };
+}
+
+function stmtUpsertProspecto(p) {
+  return {
+    sql: `INSERT INTO alfatrack_prospectos (
+            id, nombre, telefono, telefono_secundario, cedula, tipo_credito, direccion, negocio, monto,
+            plataforma, campana, email_gerente, notas, promotor_origen_id, promotor_nombre, sucursal_origen,
+            sucursal, estado, gestor_id, motivo_descarte, cc_json, gerencia_json, desembolso_json, historial_json, creado, actualizado
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            nombre = excluded.nombre,
+            telefono = excluded.telefono,
+            telefono_secundario = excluded.telefono_secundario,
+            cedula = excluded.cedula,
+            tipo_credito = excluded.tipo_credito,
+            direccion = excluded.direccion,
+            negocio = excluded.negocio,
+            monto = excluded.monto,
+            plataforma = excluded.plataforma,
+            campana = excluded.campana,
+            email_gerente = excluded.email_gerente,
+            notas = excluded.notas,
+            promotor_nombre = excluded.promotor_nombre,
+            sucursal = excluded.sucursal,
+            estado = excluded.estado,
+            gestor_id = excluded.gestor_id,
+            motivo_descarte = excluded.motivo_descarte,
+            cc_json = excluded.cc_json,
+            gerencia_json = excluded.gerencia_json,
+            desembolso_json = excluded.desembolso_json,
+            historial_json = excluded.historial_json,
+            actualizado = excluded.actualizado`,
+    args: [
+      p.id, p.nombre, p.telefono, p.telefonoSecundario || '', p.cedula || '',
+      p.tipoCredito || 'NV(NUEVO)', p.direccion || '', p.negocio || '', Number(p.monto) || 0,
+      p.plataforma || 'Cambaceo / Campo', p.campana || '', p.emailGerente || '', p.notas || '',
+      p.promotor_origen_id, p.promotor_nombre, p.sucursal_origen || p.sucursal, p.sucursal,
+      p.estado, p.gestorId || null, p.motivoDescarte || '',
+      p.cc ? JSON.stringify(p.cc) : null,
+      p.gerencia ? JSON.stringify(p.gerencia) : null,
+      p.desembolso ? JSON.stringify(p.desembolso) : null,
+      JSON.stringify(p.historial || []),
+      p.creado, p.actualizado,
+    ],
+  };
+}
+
+function stmtUpsertNotif(n) {
+  return {
+    sql: `INSERT INTO alfatrack_notificaciones (id, user_id, texto, prospecto_id, ts, leida, toasted)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET leida = excluded.leida, toasted = excluded.toasted`,
+    args: [n.id, n.userId, n.texto, n.prospectoId || null, n.ts, n.leida ? 1 : 0, n.toasted ? 1 : 0],
+  };
+}
+
+function stmtInsertAudit(a) {
+  return {
+    sql: `INSERT INTO alfatrack_auditoria (ts, user_id, usuario, rol, accion, detalle)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [a.ts, a.userId || '', a.usuario || '', a.rol || '', a.accion || '', a.detalle || ''],
+  };
+}
+
+async function persistDeltaToTurso(state, delta, expectedRev) {
+  const cfg = getTursoConfig();
+  if (!cfg.enabled) return { ok: true, mode: 'local' };
+  await ensureSchema();
+  const ts = new Date().toISOString();
+
+  // Step 1: Optimistic concurrency compare-and-swap on alfatrack_state
+  if (expectedRev !== undefined && expectedRev !== null) {
+    const cas = await tursoPipeline([
+      {
+        sql: `UPDATE alfatrack_state
+              SET version = version + 1, payload_json = ?, updated_at = ?
+              WHERE id = 'main' AND version = ?`,
+        args: [JSON.stringify(state), ts, Number(expectedRev)],
+      },
+    ]);
+    if (!cas.ok) return cas;
+    const affected = parseTursoResult(cas.results[0]).affectedRowCount;
+    if (affected === 0) {
+      return { ok: false, conflict: true, error: 'Conflicto de versión concurrente en base de datos.' };
+    }
+  } else {
+    const up = await tursoPipeline([
+      {
+        sql: `INSERT INTO alfatrack_state (id, version, payload_json, updated_at)
+              VALUES ('main', 1, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET version = alfatrack_state.version + 1, payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
+        args: [JSON.stringify(state), ts],
+      },
+    ]);
+    if (!up.ok) return up;
+  }
+
+  // Step 2: Targeted transactional upserts for affected rows only (no full-table DELETEs)
+  const stmts = ['BEGIN'];
+  if (delta.usuarios && delta.usuarios.length) {
+    for (const u of delta.usuarios) stmts.push(stmtUpsertUsuario(u, ts));
+  }
+  if (delta.prospectos && delta.prospectos.length) {
+    for (const p of delta.prospectos) stmts.push(stmtUpsertProspecto(p));
+  }
+  if (delta.notificaciones && delta.notificaciones.length) {
+    for (const n of delta.notificaciones) stmts.push(stmtUpsertNotif(n));
+  }
+  if (delta.auditoria && delta.auditoria.length) {
+    for (const a of delta.auditoria) stmts.push(stmtInsertAudit(a));
+  }
+  if (delta.config) {
+    stmts.push({
+      sql: `INSERT INTO alfatrack_config (clave, valor_json, actualizado)
+            VALUES ('config', ?, ?)
+            ON CONFLICT(clave) DO UPDATE SET valor_json = excluded.valor_json, actualizado = excluded.actualizado`,
+      args: [JSON.stringify(state.config), ts],
+    });
+  }
+  stmts.push('COMMIT');
+
+  if (stmts.length === 2) return { ok: true, latencyMs: 1 };
+  return tursoPipeline(stmts);
 }
 
 async function syncStateToTurso(state) {
@@ -297,10 +399,11 @@ async function syncStateToTurso(state) {
   await ensureSchema();
   const ts = new Date().toISOString();
   const stmts = [
+    'BEGIN',
     {
       sql: `INSERT INTO alfatrack_state (id, version, payload_json, updated_at)
             VALUES ('main', 1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
+            ON CONFLICT(id) DO UPDATE SET version = alfatrack_state.version + 1, payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
       args: [JSON.stringify(state), ts],
     },
     'DELETE FROM alfatrack_usuarios',
@@ -311,7 +414,7 @@ async function syncStateToTurso(state) {
       sql: `INSERT INTO alfatrack_usuarios (id, username, password, password_hash, nombre, rol, sucursal, email, activo, ultimo_acceso, actualizado)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
-        u.id, u.username, u.password, u.passwordHash || Core.hashPwd(u.password),
+        u.id, u.username, u.password || '', u.passwordHash || Core.hashPwd(u.password || ''),
         u.nombre, u.rol, u.sucursal, u.email || '', u.activo ? 1 : 0,
         u.ultimoAcceso || null, u.actualizado || ts,
       ],
@@ -352,11 +455,7 @@ async function syncStateToTurso(state) {
 
   stmts.push('DELETE FROM alfatrack_auditoria');
   for (const a of state.auditoria.slice(-400)) {
-    stmts.push({
-      sql: `INSERT INTO alfatrack_auditoria (ts, user_id, usuario, rol, accion, detalle)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [a.ts, a.userId || '', a.usuario || '', a.rol || '', a.accion || '', a.detalle || ''],
-    });
+    stmts.push(stmtInsertAudit(a));
   }
 
   stmts.push({
@@ -366,6 +465,7 @@ async function syncStateToTurso(state) {
     args: [JSON.stringify(state.config), ts],
   });
 
+  stmts.push('COMMIT');
   return tursoPipeline(stmts);
 }
 
@@ -374,50 +474,98 @@ async function getState() {
   if (cfg.enabled) {
     await ensureSchema();
     const r = await tursoPipeline([
-      `SELECT payload_json, updated_at FROM alfatrack_state WHERE id = 'main' LIMIT 1`,
+      `SELECT version, payload_json, updated_at FROM alfatrack_state WHERE id = 'main' LIMIT 1`,
     ]);
     if (r.ok && r.results && r.results[0]) {
       const parsed = parseTursoResult(r.results[0]);
       if (parsed.rows.length && parsed.rows[0].payload_json) {
         try {
           const rawState = JSON.parse(parsed.rows[0].payload_json);
+          const rev = Number(parsed.rows[0].version || 1);
           const beforeStr = JSON.stringify(rawState.usuarios || []);
           const s = upgradeState(rawState);
-          writeLocalStore(s);
+          writeLocalStore(s, undefined, rev);
           if (JSON.stringify(s.usuarios) !== beforeStr) {
             await syncStateToTurso(s);
           }
-          return { state: s, source: 'turso', latencyMs: r.latencyMs };
+          return { state: s, source: 'turso', latencyMs: r.latencyMs, rev };
         } catch {}
       }
     }
-    // Seed Turso on first run
     const local = readLocalStore();
     const initial = local ? local.state : upgradeState(Core.seed());
-    writeLocalStore(initial);
+    const rev = writeLocalStore(initial, undefined, 1);
     const syncRes = await syncStateToTurso(initial);
-    return { state: initial, source: syncRes.ok ? 'turso-seeded' : 'local-fallback', latencyMs: syncRes.latencyMs || 0 };
+    return { state: initial, source: syncRes.ok ? 'turso-seeded' : 'local-fallback', latencyMs: syncRes.latencyMs || 0, rev };
   }
 
   const local = readLocalStore();
-  if (local) return { state: local.state, source: 'local', latencyMs: 1 };
+  if (local) return { state: local.state, source: 'local', latencyMs: 1, rev: local.rev || 1 };
   const seeded = upgradeState(Core.seed());
-  writeLocalStore(seeded, []);
-  return { state: seeded, source: 'local-seeded', latencyMs: 1 };
+  const rev = writeLocalStore(seeded, [], 1);
+  return { state: seeded, source: 'local-seeded', latencyMs: 1, rev };
 }
 
-async function saveState(state) {
+async function saveState(state, opts) {
+  opts = opts || {};
   const clean = upgradeState(state);
-  writeLocalStore(clean);
-  const res = await syncStateToTurso(clean);
-  return { ok: true, tursoSynced: Boolean(res && res.ok), latencyMs: (res && res.latencyMs) || 1 };
+  const cfg = getTursoConfig();
+
+  if (!cfg.enabled) {
+    if (opts.expectedRev !== undefined && opts.expectedRev !== null) {
+      const cur = readLocalStore();
+      const curRev = (cur && cur.rev) || 1;
+      if (curRev !== Number(opts.expectedRev)) {
+        return { ok: false, conflict: true, error: 'Conflicto de versión concurrente.' };
+      }
+    }
+    const nextRev = writeLocalStore(clean);
+    return { ok: true, tursoSynced: false, latencyMs: 1, rev: nextRev };
+  }
+
+  const res = opts.delta
+    ? await persistDeltaToTurso(clean, opts.delta, opts.expectedRev)
+    : await syncStateToTurso(clean);
+
+  if (res && res.conflict) {
+    return { ok: false, conflict: true, error: res.error };
+  }
+
+  const nextRev = opts.expectedRev ? Number(opts.expectedRev) + 1 : writeLocalStore(clean);
+  writeLocalStore(clean, undefined, nextRev);
+  return { ok: true, tursoSynced: Boolean(res && res.ok), latencyMs: (res && res.latencyMs) || 1, rev: nextRev };
 }
 
 async function resetState() {
   const fresh = upgradeState(Core.seed());
-  writeLocalStore(fresh);
+  const rev = writeLocalStore(fresh);
   const res = await syncStateToTurso(fresh);
-  return { ok: true, state: fresh, tursoSynced: Boolean(res && res.ok) };
+  return { ok: true, state: fresh, tursoSynced: Boolean(res && res.ok), rev };
+}
+
+async function getHealthInfo() {
+  const cfg = getTursoConfig();
+  if (cfg.enabled) {
+    const r = await tursoPipeline(['SELECT 1 AS ok']);
+    return {
+      ok: true,
+      status: 'healthy',
+      engine: 'Turso Cloud SQLite (libSQL AWS us-east-2)',
+      tursoConnected: Boolean(r && r.ok),
+      source: r && r.ok ? 'turso' : 'local-fallback',
+      latencyMs: (r && r.latencyMs) || 1,
+      timestamp: new Date().toISOString(),
+    };
+  }
+  return {
+    ok: true,
+    status: 'healthy',
+    engine: 'Local JSON/SQLite Engine',
+    tursoConnected: false,
+    source: 'local',
+    latencyMs: 1,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 async function getDbStats() {
@@ -494,7 +642,6 @@ async function queryTable(tableName, limit) {
     }
   }
 
-  // Fallback to local state projection
   const { state } = await getState();
   const local = readLocalStore();
   let rows = [];
@@ -549,9 +696,10 @@ async function runSafeSQL(sqlQuery) {
     return { ok: true, columns: parsed.columns, rows: parsed.rows, latencyMs: r.latencyMs };
   }
 
-  // Local mode lightweight SELECT emulator for alfatrack_* tables
   const m = q.match(/FROM\s+(alfatrack_\w+)/i);
-  const tbl = m ? m[1].toLowerCase() : 'alfatrack_usuarios';
+  if (!m) return { ok: false, error: 'Indique una tabla válida (alfatrack_usuarios, alfatrack_prospectos, etc.).' };
+  const tbl = m[1].toLowerCase();
+  if (!ALLOWED_TABLES.includes(tbl)) return { ok: false, error: `Tabla no encontrada: ${tbl}` };
   return queryTable(tbl, 200);
 }
 
@@ -628,6 +776,7 @@ module.exports = {
   getState,
   saveState,
   resetState,
+  getHealthInfo,
   getDbStats,
   queryTable,
   runSafeSQL,

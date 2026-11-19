@@ -78,6 +78,10 @@
   const sinAcentos = (str) => String(str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const normUser = (str) => sinAcentos(str).toLowerCase().replace(/[^a-z0-9._-]/g, '');
 
+  const nodeCrypto = (typeof require === 'function' && typeof window === 'undefined')
+    ? (() => { try { return require('node:crypto'); } catch { return null; } })()
+    : null;
+
   function hashPwd(pwd) {
     const s = 'alfatrack_salt_2026:' + String(pwd || '');
     let h1 = 0xdeadbeef ^ s.length, h2 = 0x41c6ce57 ^ s.length;
@@ -89,6 +93,36 @@
     h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
     h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
     return 'at256$' + (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function hashPwdScrypt(pwd, existingSalt) {
+    if (!nodeCrypto || typeof nodeCrypto.scryptSync !== 'function') return hashPwd(pwd);
+    const salt = existingSalt || nodeCrypto.randomBytes(16).toString('hex');
+    const derived = nodeCrypto.scryptSync(String(pwd || ''), salt, 32).toString('hex');
+    return `scrypt$${salt}$${derived}`;
+  }
+
+  function makePasswordHash(pwd) {
+    return nodeCrypto ? hashPwdScrypt(pwd) : hashPwd(pwd);
+  }
+
+  function verifyPwd(u, pwd) {
+    if (!u) return false;
+    const candidate = String(pwd || '');
+    const stored = String(u.passwordHash || '');
+    if (stored.startsWith('scrypt$') && nodeCrypto && typeof nodeCrypto.scryptSync === 'function') {
+      const parts = stored.split('$');
+      if (parts.length !== 3) return false;
+      const [, salt, hexHash] = parts;
+      try {
+        const expected = Buffer.from(hexHash, 'hex');
+        const actual = nodeCrypto.scryptSync(candidate, salt, expected.length);
+        return expected.length === actual.length && nodeCrypto.timingSafeEqual(expected, actual);
+      } catch {
+        return false;
+      }
+    }
+    return u.password === candidate || (stored !== '' && stored === hashPwd(candidate));
   }
 
   function genUsername(nombre, usados) {
@@ -149,11 +183,14 @@
       (x.email && x.email.toLowerCase() === q) ||
       sinAcentos(x.nombre).toLowerCase() === sinAcentos(q)
     );
-    if (!u || (u.password !== pwd && u.passwordHash !== hashPwd(pwd))) {
+    if (!u || !verifyPwd(u, pwd)) {
       return err('Usuario o contraseña incorrectos.');
     }
     if (!u.activo) {
       return err('Su usuario está dado de baja. Contacte al Administrador General.');
+    }
+    if (nodeCrypto && !String(u.passwordHash || '').startsWith('scrypt$')) {
+      u.passwordHash = hashPwdScrypt(pwd);
     }
     u.ultimoAcceso = now();
     auditar(s, u, 'Inicio de sesión', `Acceso autenticado (${u.username} · ${ROLES[u.rol]} · ${u.sucursal})`);
@@ -168,14 +205,14 @@
     if (!esAdmin && actor.id !== u.id) return err('No tiene permiso para cambiar la contraseña de otro usuario.');
     if (!esAdmin) {
       const actual = String(passwordActual || '');
-      if (u.password !== actual && u.passwordHash !== hashPwd(actual)) {
+      if (!verifyPwd(u, actual)) {
         return err('La contraseña actual no es correcta.');
       }
     }
     const nueva = String(passwordNueva || '').trim();
     if (nueva.length < 4) return err('La nueva contraseña debe tener al menos 4 caracteres.');
     u.password = nueva;
-    u.passwordHash = hashPwd(nueva);
+    u.passwordHash = makePasswordHash(nueva);
     u.actualizado = now();
     auditar(s, actor, 'Contraseña actualizada', `Contraseña modificada para ${u.nombre} (${u.username}).`);
     return { ok: true, usuario: u };
@@ -759,7 +796,7 @@
         sucursal: d.sucursal,
         username,
         password: nextPwd,
-        passwordHash: hashPwd(nextPwd),
+        passwordHash: rawPwd || !String(u.passwordHash || '').startsWith('scrypt$') ? makePasswordHash(nextPwd) : u.passwordHash,
         actualizado: now(),
       });
       if (email !== undefined) u.email = email;
@@ -774,7 +811,7 @@
       id: uid('u'),
       username,
       password: pwd,
-      passwordHash: hashPwd(pwd),
+      passwordHash: makePasswordHash(pwd),
       nombre,
       rol: d.rol,
       sucursal: d.sucursal,
@@ -1088,11 +1125,83 @@
     return s;
   }
 
+  // Unified state migration & upgrade (used by both server DB and browser client)
+  const OFFICIAL_IDS = new Set([
+    'u-pro-managua', 'u-pro-mga-lester', 'u-pro-mga-claudia', 'u-pro-mga-marjorie',
+    'u-pro-mas-fanny', 'u-pro-mas-noelia', 'u-pro-mas-yeiling',
+    'u-pro-jin-nidia', 'u-pro-jui-martha',
+    'u-pro-seb-evelia', 'u-pro-seb-jiurem',
+    'u-pro-leo-araceli', 'u-pro-leo-lorena',
+  ]);
+
+  function upgradeState(s, opts) {
+    opts = opts || {};
+    if (!s || typeof s !== 'object') return seed();
+    const base = seed();
+    s.version = 1;
+    s.config = Object.assign({}, base.config, s.config || {});
+    s.config.emailsGerentes = Object.assign({}, base.config.emailsGerentes, (s.config && s.config.emailsGerentes) || {});
+    if (!Array.isArray(s.config.tiposCredito) || !s.config.tiposCredito.length) s.config.tiposCredito = base.config.tiposCredito;
+    if (!Array.isArray(s.config.plataformas) || !s.config.plataformas.length) s.config.plataformas = base.config.plataformas;
+
+    s.usuarios = Array.isArray(s.usuarios) ? s.usuarios : [];
+    const byId = new Map(s.usuarios.map((u) => [u.id, u]));
+    const usedUsernames = new Set(s.usuarios.map((u) => (u.username || '').toLowerCase()).filter(Boolean));
+    const scoped = Boolean(opts.scoped || s._scoped);
+    const needsOfficialMigration = !s.officialPromotersV2 && !scoped;
+
+    for (const u of s.usuarios) {
+      const seedMatch = base.usuarios.find((bu) => bu.id === u.id);
+      if (needsOfficialMigration && seedMatch && OFFICIAL_IDS.has(u.id)) {
+        usedUsernames.delete((u.username || '').toLowerCase());
+        u.nombre = seedMatch.nombre;
+        u.sucursal = seedMatch.sucursal;
+        u.username = seedMatch.username;
+        usedUsernames.add(u.username);
+      }
+      if (!u.username) {
+        u.username = (seedMatch && !usedUsernames.has(seedMatch.username))
+          ? seedMatch.username
+          : genUsername(u.nombre, usedUsernames);
+        usedUsernames.add(u.username);
+      }
+      if (!scoped) {
+        if (!u.password) {
+          u.password = (seedMatch && seedMatch.password) || (u.id === 'u-admin' ? 'admin123' : genPassword(u.username));
+        }
+        if (!u.passwordHash) u.passwordHash = hashPwd(u.password);
+      }
+      if (u.email === undefined && seedMatch) u.email = seedMatch.email || '';
+    }
+
+    if (!scoped) {
+      for (const bu of base.usuarios) {
+        if (!byId.has(bu.id) && !usedUsernames.has(bu.username)) {
+          s.usuarios.push(JSON.parse(JSON.stringify(bu)));
+          byId.set(bu.id, bu);
+          usedUsernames.add(bu.username);
+        }
+      }
+    }
+
+    s.prospectos = Array.isArray(s.prospectos) ? s.prospectos : (scoped ? [] : base.prospectos);
+    if (needsOfficialMigration) {
+      s.prospectos.forEach((p) => {
+        const uOrig = byId.get(p.promotor_origen_id);
+        if (uOrig && OFFICIAL_IDS.has(uOrig.id)) p.promotor_nombre = uOrig.nombre;
+      });
+    }
+    s.officialPromotersV2 = true;
+    s.notificaciones = Array.isArray(s.notificaciones) ? s.notificaciones : (scoped ? [] : base.notificaciones);
+    s.auditoria = Array.isArray(s.auditoria) ? s.auditoria : (scoped ? [] : base.auditoria);
+    return s;
+  }
+
   return {
     ROLES, ESTADOS, PASO, CAMPOS_EDITABLES, setClock, defaultConfig, soloDigitos, normCedula, validarTelefono, fill,
-    sinAcentos, normUser, hashPwd, genUsername, genPassword, autenticar, cambiarPassword,
+    sinAcentos, normUser, hashPwd, hashPwdScrypt, makePasswordHash, verifyPwd, genUsername, genPassword, autenticar, cambiarPassword,
     puedeVer, visibles, transiciones, buscarDuplicado, mensajeDuplicado, crearProspecto, capturarProspectoCallCenter,
     categorizarTelefonoCSV, resolverPromotorCSV, clasificarFilasCSV, importarFilasCSV,
-    cambiarEstado, agregarNota, adminEditarProspecto, guardarUsuario, toggleUsuario, guardarConfig, marcarLeidas, metricas, gerentesDe, seed,
+    cambiarEstado, agregarNota, adminEditarProspecto, guardarUsuario, toggleUsuario, guardarConfig, marcarLeidas, metricas, gerentesDe, seed, upgradeState,
   };
 });
