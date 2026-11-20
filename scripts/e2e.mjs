@@ -356,6 +356,126 @@ try {
   assert.strictEqual(r.autoEmail, 'gerentemanaguabolonia@gmail.com');
   assert.ok(r.hasCCSeal && r.hasCCMetrics, JSON.stringify(r));
 
+  // 11. Monthly / Weekly / Daily Period Control & Date/Quantity Metrics across all 5 roles (calendar-agnostic + dark/mobile layout)
+  r = await ev(H + `
+    // 11a. Admin Métricas: defaults to Este mes (Mes actual), toggles Día/Semana/Mes, verifies bar track alignment, month dropdown, Ver mes, CSV export & carry-over chip
+    const adminDefaultMes = !!$('.period-bar') && $('.period-badge')?.textContent.includes('Mes actual') && $('#app').textContent.includes('Corte limpio cada 1° del mes');
+    click('[data-action=periodo-gran][data-val=semana]');
+    const granSemanaOk = $('.view-switch button.on')?.textContent.includes('Semana') && $('#app').textContent.includes('Semana a Semana');
+    click('[data-action=periodo-gran][data-val=mes]');
+    const granMesOk = $('#app').textContent.includes('Mes a Mes');
+    click('[data-action=periodo-gran][data-val=dia]');
+    const granDiaOk = $('#app').textContent.includes('Día a Día') && $$('.chart-row').length > 0;
+    const trackWidths = $$('.chart-tracks').map(el => Math.round(el.getBoundingClientRect().width));
+    const barsAlignedDesktop = trackWidths.length > 0 && Math.max(...trackWidths) - Math.min(...trackWidths) <= 1;
+
+    // CSV export button works cleanly
+    click('[data-action=exportar-metricas-csv]');
+    const csvToastOk = toasts().some(t => t.includes('Métricas CSV'));
+
+    // Switching to Hoy exposes carry-over chip (seed has leads from prior days) & clicking it opens Histórico
+    click('[data-action=periodo-tipo][data-val=hoy]');
+    const hoyOk = $('.period-badge')?.textContent.includes('Hoy');
+    const carryBtn = $('.period-carry');
+    const carryChipVisible = !!carryBtn;
+    if (carryBtn) carryBtn.click();
+    const carryToTodoOk = $('.period-badge')?.textContent.includes('Histórico completo');
+    const todoTotal = Number($('.kpis .kpi b')?.textContent || '0');
+
+    // Ver mes button in Control Histórico Mes a Mes jumps directly to that month
+    const verMesBtn = $('[data-action=periodo-ir-mes]');
+    const verMesTarget = verMesBtn?.dataset.val || '';
+    if (verMesBtn) verMesBtn.click();
+    const verMesOk = !!verMesTarget && $('[data-change=periodo-mes]')?.value === verMesTarget;
+
+    // Month <select> dropdown selects another month and switches cleanly
+    const selMes = $('[data-change=periodo-mes]');
+    const optPrev = [...selMes.options].find(o => o.value && o.value !== verMesTarget);
+    let selectMesOk = false;
+    if (optPrev) {
+      set(selMes, optPrev.value);
+      selectMesOk = $('[data-change=periodo-mes]')?.value === optPrev.value;
+    }
+
+    // Calendar-agnostic empty range isolation (Jan 2020 must be 0 cleanly)
+    click('[data-action=periodo-tipo][data-val=rango]');
+    const rangoPickersOk = !!$('[data-change=periodo-desde]') && !!$('[data-change=periodo-hasta]');
+    set($('[data-change=periodo-desde]'), '2020-01-01');
+    set($('[data-change=periodo-hasta]'), '2020-01-31');
+    const emptyRangeZero = Number($('.kpis .kpi b')?.textContent || '-1') === 0 && $('#app').textContent.includes('inicia limpio en 0');
+
+    // Verify no stale desde leaks when switching Rango -> Hoy -> changing hasta in Prospectos filtrosHTML, and limpiar-filtros preserves mes_anterior
+    click('[data-action=periodo-tipo][data-val=hoy]');
+    const hoyStr = $('.period-badge')?.textContent || '';
+    click('.tabs button', 'Prospectos');
+    const filtForm = $('form[data-form=filtros]');
+    const hoyDesdeVal = filtForm.desde.value;
+    set(filtForm.hasta, hoyDesdeVal);
+    const noStaleDesde = $('form[data-form=filtros]')?.desde.value === hoyDesdeVal;
+    click('[data-action=periodo-tipo][data-val=mes_anterior]');
+    const prevBadge = $('.period-badge')?.textContent || '';
+    set($('form[data-form=filtros]').sucursal, 'Managua');
+    click('[data-action=limpiar-filtros]');
+    const limpiarPreservedMonth = $('.period-badge')?.textContent === prevBadge && $('form[data-form=filtros]').sucursal.value === '';
+
+    click('.tabs button', 'Métricas');
+    click('[data-action=periodo-tipo][data-val=mes]');
+    const curMonthTotal = Number($('.kpis .kpi b')?.textContent || '0');
+    const countsConsistent = curMonthTotal >= 1 && curMonthTotal <= todoTotal;
+
+    // 11b. Promotor (fanny.ramirez): Period Bar + Mis Métricas tab + empty custom range isolation
+    await loginAs('fanny.ramirez', 'fanny123');
+    click('.tabs button', 'Mis Métricas');
+    const proHasMetrics = !!$('.period-bar') && $('#app').textContent.includes('Mis Métricas por Fecha y Cantidades') && $('#app').textContent.includes('Control Histórico Mes a Mes');
+    const proCurPositive = Number($('.kpis .kpi b')?.textContent || '0') >= 1;
+    click('[data-action=periodo-tipo][data-val=rango]');
+    set($('[data-change=periodo-desde]'), '2020-01-01');
+    set($('[data-change=periodo-hasta]'), '2020-01-31');
+    const proEmptyRangeZero = Number($('.kpis .kpi b')?.textContent || '-1') === 0;
+    click('[data-action=periodo-tipo][data-val=mes]');
+
+    // 11c. Call Center (betsy.ruiz): Period Bar + Métricas CC tab + Agent Productivity table
+    await loginAs('betsy.ruiz', 'betsy123');
+    click('.tabs button', 'Métricas CC');
+    const ccHasMetrics = !!$('.period-bar') && $('#app').textContent.includes('Métricas Call Center por Fecha') && $('#app').textContent.includes('Productividad por Agente Call Center') && $('#app').textContent.includes('Betsy Mabell Ruíz Herrera');
+
+    // 11d. Gestor (diego.mendoza): Period Bar + Mis Métricas tab
+    await loginAs('diego.mendoza', 'diego123');
+    click('.tabs button', 'Mis Métricas');
+    const gesHasMetrics = !!$('.period-bar') && $('#app').textContent.includes('Mis Métricas de Evaluación y Cierre') && $('#app').textContent.includes('Control Histórico Mes a Mes');
+
+    // 11e. Gerente Masaya (gerente.masaya): Period Bar + Métricas tab
+    await loginAs('gerente.masaya', 'masaya123');
+    click('.tabs button', 'Métricas');
+    const gerHasMetrics = !!$('.period-bar') && $('#app').textContent.includes('Embudo Sucursal Masaya') && $('#app').textContent.includes('Métricas por Fecha — Sucursal Masaya');
+    return {
+      adminDefaultMes, granSemanaOk, granMesOk, granDiaOk, barsAlignedDesktop, csvToastOk,
+      hoyOk, carryChipVisible, carryToTodoOk, verMesOk, selectMesOk, rangoPickersOk,
+      emptyRangeZero, noStaleDesde, limpiarPreservedMonth, countsConsistent,
+      proHasMetrics, proCurPositive, proEmptyRangeZero, ccHasMetrics, gesHasMetrics, gerHasMetrics,
+    };`);
+  assert.ok(
+    r.adminDefaultMes && r.granSemanaOk && r.granMesOk && r.granDiaOk && r.barsAlignedDesktop && r.csvToastOk &&
+    r.hoyOk && r.carryChipVisible && r.carryToTodoOk && r.verMesOk && r.selectMesOk && r.rangoPickersOk &&
+    r.emptyRangeZero && r.noStaleDesde && r.limpiarPreservedMonth && r.countsConsistent &&
+    r.proHasMetrics && r.proCurPositive && r.proEmptyRangeZero && r.ccHasMetrics && r.gesHasMetrics && r.gerHasMetrics,
+    JSON.stringify(r)
+  );
+  await shot('10-period-metrics', 1280, 900, false);
+
+  // 11f. Mobile 390px + Dark Mode verification on Period Bar & Date/Quantity Bar Chart (zero horizontal overflow)
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await sleep(200);
+  r = await ev(H + `
+    if (document.documentElement.dataset.theme !== 'dark') click('[data-action=toggle-theme]');
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    const noHorizOverflow = document.documentElement.scrollWidth <= window.innerWidth + 1;
+    const minTrackW = Math.min(...$$('.chart-tracks').map(el => Math.round(el.getBoundingClientRect().width)));
+    return { isDark, noHorizOverflow, minTrackW };`);
+  assert.ok(r.isDark && r.noHorizOverflow && r.minTrackW >= 180, JSON.stringify(r));
+  await shot('11-period-metrics-dark-mobile', 390, 844, true);
+  await ev(H + `if (document.documentElement.dataset.theme === 'dark') click('[data-action=toggle-theme]');`);
+
   assert.deepStrictEqual(errors, [], 'no console errors');
   console.log('E2E OK');
 } catch (e) {

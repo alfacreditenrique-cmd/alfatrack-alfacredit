@@ -83,6 +83,7 @@
     gerOrigen: '',
     ccSyncStatus: null,
     tab: isDbManagerUrl() ? { adm: 'bd' } : {},
+    periodo: { tipo: 'mes', mes: '', desde: '', hasta: '', granularidad: 'auto' },
     f: { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' },
     csv: { filas: [], clasif: null, tab: 'validos', rawText: '' },
     db: {
@@ -199,6 +200,7 @@
     ui.gerOrigen = '';
     ui.ccSyncStatus = null;
     ui.tab = isDbManagerUrl() ? { adm: 'bd' } : {};
+    ui.periodo = { tipo: 'mes', mes: '', desde: '', hasta: '', granularidad: 'auto' };
     ui.f = { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' };
     ui.csv = { filas: [], clasif: null, tab: 'validos', rawText: '' };
     ui.db.stats = null;
@@ -801,23 +803,213 @@
   }
   const tabActual = (key, def) => ui.tab[key] || def;
 
+  // ---------- period control bar & date/quantity metrics ----------
+  const getPeriodoActivo = () => C.rangoPeriodo(ui.periodo);
+
+  function deltaHTML(val, refLabel, isMoney) {
+    if (val === undefined || val === null || !refLabel) return '';
+    const num = Number(val) || 0;
+    const cls = num > 0 ? 'delta-up' : num < 0 ? 'delta-down' : 'delta-flat';
+    const arrow = num > 0 ? '▲ +' : num < 0 ? '▼ -' : '= ';
+    const fmt = isMoney ? money(Math.abs(num)) : String(Math.abs(num));
+    return `<small class="kpi-sub"><span class="delta ${cls}">${arrow}${fmt}</span> vs ${h(refLabel)}</small>`;
+  }
+
+  function barraPeriodoHTML(baseList) {
+    const rango = getPeriodoActivo();
+    const meses = C.mesesDisponibles(baseList || []);
+    const pendPrev = C.pendientesAnteriores(baseList || [], rango);
+    const esMesActualSel = rango.tipo === 'mes' && rango.esMesActual;
+    const mesSeleccionado = (rango.tipo === 'mes' || rango.tipo === 'mes_anterior') ? rango.mes : '';
+
+    return `<section class="period-bar" aria-label="Control de período mensual, semanal y diario">
+      <div class="period-head">
+        <div class="period-title">
+          <span class="period-badge">📅 ${h(rango.etiqueta)}</span>
+          ${esMesActualSel ? '<span class="period-cut">Corte limpio cada 1° del mes</span>' : ''}
+        </div>
+        ${pendPrev.length ? `<button type="button" class="period-carry" data-action="periodo-tipo" data-val="todo" title="Casos abiertos registrados antes de este período">📌 ${pendPrev.length} activo(s) de períodos anteriores · Ver histórico</button>` : ''}
+      </div>
+      <div class="period-controls">
+        <div class="period-presets" role="group" aria-label="Períodos rápidos">
+          <button type="button" class="chip ${rango.tipo === 'hoy' ? 'on' : ''}" data-action="periodo-tipo" data-val="hoy">Hoy</button>
+          <button type="button" class="chip ${rango.tipo === 'semana' ? 'on' : ''}" data-action="periodo-tipo" data-val="semana">Esta semana</button>
+          <button type="button" class="chip ${esMesActualSel ? 'on' : ''}" data-action="periodo-tipo" data-val="mes">Este mes</button>
+          <button type="button" class="chip ${rango.tipo === 'mes_anterior' ? 'on' : ''}" data-action="periodo-tipo" data-val="mes_anterior">Mes anterior</button>
+          <button type="button" class="chip ${rango.tipo === 'rango' ? 'on' : ''}" data-action="periodo-tipo" data-val="rango">📆 Rango</button>
+          <button type="button" class="chip ${rango.tipo === 'todo' ? 'on' : ''}" data-action="periodo-tipo" data-val="todo">Histórico</button>
+        </div>
+        <div class="period-pickers">
+          <select class="period-select" data-change="periodo-mes" aria-label="Elegir mes específico">
+            <option value="" ${!mesSeleccionado ? 'selected' : ''}>Elegir mes…</option>
+            ${meses.map((x) => `<option value="${h(x.key)}" ${x.key === mesSeleccionado ? 'selected' : ''}>${h(x.etiqueta)}${x.esActual ? ' (Actual)' : ''}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      ${ui.periodo.tipo === 'rango' ? `<div class="period-range-box">
+        <label>Desde <input type="date" class="period-date" data-change="periodo-desde" value="${h(ui.periodo.desde || rango.desde)}"></label>
+        <label>Hasta <input type="date" class="period-date" data-change="periodo-hasta" value="${h(ui.periodo.hasta || rango.hasta)}"></label>
+      </div>` : ''}
+    </section>`;
+  }
+
+  function panelMetricasFechaHTML(baseList, opts) {
+    opts = opts || {};
+    const rango = getPeriodoActivo();
+    const m = C.metricas(S, {
+      prospectos: baseList,
+      periodo: rango,
+      incluirComparativo: true,
+      granularidad: ui.periodo.granularidad || 'auto',
+    });
+    const series = m.series || { granularidad: 'dia', items: [] };
+    const gran = series.granularidad;
+    const granLbl = gran === 'dia' ? 'Día a Día' : gran === 'semana' ? 'Semana a Semana' : 'Mes a Mes';
+    const items = series.items || [];
+    const maxVal = Math.max(1, ...items.map((x) => Math.max(x.captados, x.desembolsados, x.calificados)));
+    const histMensual = C.resumenMensual(baseList);
+    const totalCap = items.reduce((a, x) => a + x.captados, 0);
+    const totalCal = items.reduce((a, x) => a + x.calificados, 0);
+    const totalSeg = items.reduce((a, x) => a + x.seguimiento, 0);
+    const totalDes = items.reduce((a, x) => a + x.desembolsados, 0);
+    const totalDesc = items.reduce((a, x) => a + x.descartados, 0);
+    const totalMSol = items.reduce((a, x) => a + x.montoSolicitado, 0);
+    const totalMDes = items.reduce((a, x) => a + x.montoDesembolsado, 0);
+    const convTotal = totalCap ? Math.min(100, Math.round((totalDes / totalCap) * 100)) : 0;
+    const agentesCC = Object.values(m.porAgenteCC || {}).sort((a, b) => (b.pescados + b.directos) - (a.pescados + a.directos) || b.monto - a.monto);
+    const curUser = opts.currentUser || null;
+
+    return `<div class="panel">
+      <div class="toolbar-row">
+        <div>
+          <h3 style="margin:0">${h(opts.titulo || '📈 Avance por Fecha y Cantidades')} — <small>${h(rango.etiqueta)}</small></h3>
+          <small>Desglose ${h(granLbl)} · ${totalCap} captados · ${totalCal} calificados · ${totalDes} desembolsados (${money(totalMDes)})${m.desembolsosArrastre ? ` · incl. ${m.desembolsosArrastre} cierre(s) de mes anterior` : ''}</small>
+        </div>
+        <div class="actions" style="margin:0">
+          <div class="view-switch" role="group" aria-label="Agrupación temporal">
+            <button type="button" class="${gran === 'dia' ? 'on' : ''}" data-action="periodo-gran" data-val="dia">Día</button>
+            <button type="button" class="${gran === 'semana' ? 'on' : ''}" data-action="periodo-gran" data-val="semana">Semana</button>
+            <button type="button" class="${gran === 'mes' ? 'on' : ''}" data-action="periodo-gran" data-val="mes">Mes</button>
+          </div>
+          <button type="button" class="btn sm ghost" data-action="exportar-metricas-csv">⬇️ CSV</button>
+        </div>
+      </div>
+
+      ${items.length ? `
+        <div class="chart-legend">
+          <span><i class="chart-swatch cap"></i> Captados (${totalCap})</span>
+          <span><i class="chart-swatch cal"></i> Pescados (${totalCal})</span>
+          <span><i class="chart-swatch des"></i> Desembolsados (${totalDes})</span>
+        </div>
+        ${items.length > 31 ? `<p class="hint" style="margin:0 0 6px">Mostrando los últimos 31 períodos en la gráfica (consulta los ${items.length} períodos completos en la tabla de abajo).</p>` : ''}
+        <div class="chart-bars">
+          ${items.slice(-31).map((x) => `<div class="chart-row">
+            <span class="chart-lbl" title="${h(x.clave)}">${h(x.etiqueta)}</span>
+            <div class="chart-tracks">
+              <div class="chart-track" title="Captados: ${x.captados}"><i class="chart-fill" style="width:${x.captados ? Math.max(4, (x.captados / maxVal) * 100) : 0}%"></i></div>
+              <div class="chart-track" title="Pescados / Calificados: ${x.calificados}"><i class="chart-fill cal" style="width:${x.calificados ? Math.max(4, (x.calificados / maxVal) * 100) : 0}%"></i></div>
+              <div class="chart-track" title="Desembolsados: ${x.desembolsados} (${money(x.montoDesembolsado)})"><i class="chart-fill des" style="width:${x.desembolsados ? Math.max(4, (x.desembolsados / maxVal) * 100) : 0}%"></i></div>
+            </div>
+            <span class="chart-vals tnum"><b>${x.captados}</b> cap · <b class="v-cal">${x.calificados}</b> pesc · <b class="v-des">${x.desembolsados}</b> des${x.montoDesembolsado ? ` · ${money(x.montoDesembolsado)}` : ''}</span>
+          </div>`).join('')}
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>${gran === 'dia' ? 'Fecha' : gran === 'semana' ? 'Semana' : 'Mes'}</th><th>Captados</th><th>Pescados</th><th>Seguim.</th><th>Desembolsados</th><th>Descartados</th><th>Conv.</th><th>Monto Solic.</th><th>Monto Colocado</th></tr>
+            </thead>
+            <tbody>
+              ${items.slice().reverse().map((x) => `<tr>
+                <td><b>${h(x.etiqueta)}</b></td>
+                <td class="tnum">${x.captados}</td>
+                <td class="tnum">${x.calificados}</td>
+                <td class="tnum">${x.seguimiento}</td>
+                <td class="tnum"><b>${x.desembolsados}</b></td>
+                <td class="tnum">${x.descartados}</td>
+                <td class="tnum">${x.conversion}%</td>
+                <td class="money">${money(x.montoSolicitado)}</td>
+                <td class="money"><b>${money(x.montoDesembolsado)}</b></td>
+              </tr>`).join('')}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>TOTAL (${h(rango.etiquetaCorta)})</td>
+                <td class="tnum">${totalCap}</td>
+                <td class="tnum">${totalCal}</td>
+                <td class="tnum">${totalSeg}</td>
+                <td class="tnum">${totalDes}</td>
+                <td class="tnum">${totalDesc}</td>
+                <td class="tnum">${convTotal}%</td>
+                <td class="money">${money(totalMSol)}</td>
+                <td class="money">${money(totalMDes)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      ` : `<div class="empty">
+        <p style="margin:0 0 8px">Sin movimientos registrados en <b>${h(rango.etiqueta)}</b>. El conteo inicia limpio en <b>0</b> para este período.</p>
+        <div class="actions" style="justify-content:center">
+          <button type="button" class="btn sm ghost" data-action="periodo-tipo" data-val="mes_anterior">Ver mes anterior</button>
+          <button type="button" class="btn sm ghost" data-action="periodo-tipo" data-val="todo">Ver histórico completo</button>
+        </div>
+      </div>`}
+    </div>
+
+    ${opts.showAgentTable ? `<div class="panel">
+      <h3>🎧 Productividad por Agente Call Center — <small>${h(rango.etiqueta)}</small></h3>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Agente Call Center</th><th>Gestionados</th><th>Pescados (Prom.)</th><th>Directos Gerencia</th><th>Desembolsados</th><th>Descartados</th><th>Monto Colocado</th></tr></thead>
+        <tbody>${agentesCC.map((a) => `<tr class="${curUser && a.nombre === curUser.nombre ? 'is-active-period' : ''}">
+          <td><b>${h(a.nombre)}</b>${curUser && a.nombre === curUser.nombre ? ' <span class="badge b-green">Tú</span>' : ''}</td>
+          <td class="tnum">${a.gestionados}</td>
+          <td class="tnum">${a.pescados}</td>
+          <td class="tnum">${a.directos}</td>
+          <td class="tnum"><b>${a.desembolsados}</b></td>
+          <td class="tnum">${a.descartados}</td>
+          <td class="money"><b>${money(a.monto)}</b></td>
+        </tr>`).join('') || '<tr><td colspan="7">Sin actividad de Call Center registrada en este período.</td></tr>'}</tbody>
+      </table></div>
+    </div>` : ''}
+
+    <div class="panel">
+      <h3>📆 Control Histórico Mes a Mes</h3>
+      <p class="hint">Cada mes se contabiliza por separado desde el día 1° hasta el cierre del mes. Toca <b>Ver mes</b> para consultar cualquier corte mensual sin mezclar meses.</p>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Mes</th><th>Captados</th><th>Pescados</th><th>Desembolsados</th><th>Descartados</th><th>Conv.</th><th>Monto Colocado</th><th>Acción</th></tr></thead>
+        <tbody>${histMensual.map((x) => `<tr class="${rango.mes === x.clave && (rango.tipo === 'mes' || rango.tipo === 'mes_anterior') ? 'is-active-period' : ''}">
+          <td><b>${h(x.etiqueta)}</b></td>
+          <td class="tnum">${x.captados}</td>
+          <td class="tnum">${x.calificados}</td>
+          <td class="tnum"><b>${x.desembolsados}</b></td>
+          <td class="tnum">${x.descartados}</td>
+          <td class="tnum">${x.conversion}%</td>
+          <td class="money"><b>${money(x.montoDesembolsado)}</b></td>
+          <td><button type="button" class="btn sm ghost" data-action="periodo-ir-mes" data-val="${h(x.clave)}">🔍 Ver mes</button></td>
+        </tr>`).join('') || '<tr><td colspan="8">Sin registros históricos todavía.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+  }
+
   // ---------- filters (Call Center + Admin) ----------
   function filtrar(arr) {
+    const rango = getPeriodoActivo();
+    const base = C.filtrarPorPeriodo(arr, rango, { campo: 'creado' });
     const f = ui.f;
     const q = f.q.trim().toLowerCase();
-    return arr.filter((p) =>
+    return base.filter((p) =>
       (!f.sucursal || p.sucursal === f.sucursal) &&
       (!f.estado || p.estado === f.estado) &&
       (!f.origen || (f.origen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p))) &&
       (!f.tipoCredito || (p.tipoCredito || 'NV(NUEVO)') === f.tipoCredito) &&
       (!f.plataforma || (p.plataforma || 'Cambaceo / Campo') === f.plataforma) &&
-      (!f.desde || new Date(p.creado) >= new Date(f.desde + 'T00:00:00')) &&
-      (!f.hasta || new Date(p.creado) <= new Date(f.hasta + 'T23:59:59.999')) &&
       (!q || [p.nombre, p.telefono, p.telefonoSecundario, p.cedula, p.promotor_nombre, p.asignadoPromotorNombre, (p.cc && p.cc.agente), p.negocio, p.direccion].join(' ').toLowerCase().includes(q)));
   }
 
   function filtrosHTML() {
     const f = ui.f;
+    const rango = getPeriodoActivo();
+    const desdeVal = ui.periodo.tipo === 'rango' ? (ui.periodo.desde || '') : (rango.desde || '');
+    const hastaVal = ui.periodo.tipo === 'rango' ? (ui.periodo.hasta || '') : (rango.hasta || '');
     const tcs = (S.config && S.config.tiposCredito) || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
     return `<form class="filters" data-form="filtros" onsubmit="return false">
       <input type="search" name="q" placeholder="Buscar nombre, teléfono, cédula, negocio, agente o promotor" value="${h(f.q)}" aria-label="Buscar">
@@ -825,8 +1017,8 @@
       <select name="estado" aria-label="Estado"><option value="">Todos los estados</option>${C.ESTADOS.map((e) => `<option value="${e}" ${e === f.estado ? 'selected' : ''}>${h(est(e))}</option>`).join('')}</select>
       <select name="origen" aria-label="Origen"><option value="">Todos los orígenes</option><option value="callcenter_directo" ${f.origen === 'callcenter_directo' ? 'selected' : ''}>📞 Call Center Directo</option><option value="promotor" ${f.origen === 'promotor' ? 'selected' : ''}>🔒 Promotor (Candado)</option></select>
       <select name="tipoCredito" aria-label="Tipo de Crédito"><option value="">Todo Tipo Crédito</option>${tcs.map((t) => `<option value="${h(t)}" ${t === f.tipoCredito ? 'selected' : ''}>${h(t)}</option>`).join('')}</select>
-      <label>Desde <input type="date" name="desde" value="${h(f.desde)}"></label>
-      <label>Hasta <input type="date" name="hasta" value="${h(f.hasta)}"></label>
+      <label>Desde <input type="date" name="desde" value="${h(desdeVal)}"></label>
+      <label>Hasta <input type="date" name="hasta" value="${h(hastaVal)}"></label>
       <div class="actions">
         <button type="button" class="btn sm ghost" data-action="limpiar-filtros">Limpiar</button>
         <button type="button" class="btn sm ghost" data-action="exportar-prospectos-csv">⬇️ CSV</button>
@@ -952,7 +1144,8 @@
 
   // ---------- views ----------
   function filtrarPromotor(u) {
-    const mios = C.visibles(S, u);
+    const rango = getPeriodoActivo();
+    const mios = C.filtrarPorPeriodo(C.visibles(S, u), rango, { campo: 'creado' });
     const q = ui.proSearch.trim().toLowerCase();
     return mios.filter((p) =>
       (!ui.proFilter || p.estado === ui.proFilter) &&
@@ -961,11 +1154,14 @@
   }
 
   function vistaPromotor(u) {
-    const mios = C.visibles(S, u);
+    const todosMios = C.visibles(S, u);
+    const rango = getPeriodoActivo();
+    const mios = C.filtrarPorPeriodo(todosMios, rango, { campo: 'creado' });
+    const ganados = C.filtrarPorPeriodo(todosMios, rango, { campo: 'desembolso' });
+    const m = C.metricas(S, { prospectos: todosMios, periodo: rango, incluirComparativo: true });
+    const cmp = m.comparativo;
     const tab = tabActual('pro', 'mis');
     const activos = mios.filter((p) => !['desembolsado', 'descartado'].includes(p.estado));
-    const ganados = mios.filter((p) => p.estado === 'desembolsado');
-    const montoGanado = ganados.reduce((acc, p) => acc + Number((p.desembolso && p.desembolso.monto) || p.monto || 0), 0);
     const emailGer = (S.config.emailsGerentes && S.config.emailsGerentes[u.sucursal]) || 'alfacreditenrique@gmail.com';
     const tcs = S.config.tiposCredito || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
     const plats = S.config.plataformas || ['Cambaceo / Campo', 'Whatsapp', 'Facebook', 'Instagram', 'Tik tok', 'Recomendación', 'Otro'];
@@ -1001,7 +1197,9 @@
     } else if (tab === 'csv') {
       body = vistaDepuradorCSV(u);
     } else if (tab === 'ganados') {
-      body = lista(ganados, {}, 'Aún no tienes créditos desembolsados.');
+      body = lista(ganados, {}, `Sin créditos desembolsados en ${rango.etiquetaCorta}.`);
+    } else if (tab === 'metricas') {
+      body = panelMetricasFechaHTML(todosMios, { titulo: '📈 Mis Métricas por Fecha y Cantidades', currentUser: u });
     } else {
       const filtradosMios = filtrarPromotor(u);
       body = `<div class="search-bar">
@@ -1013,24 +1211,28 @@
           <button type="button" class="chip ${ui.proFilter === 'pescado' ? 'on' : ''}" data-action="pf" data-val="pescado">Pescados (${mios.filter((x) => x.estado === 'pescado').length})</button>
           <button type="button" class="chip ${ui.proFilter === 'seguimiento' ? 'on' : ''}" data-action="pf" data-val="seguimiento">En seguimiento (${mios.filter((x) => x.estado === 'seguimiento').length})</button>
         </div>
-        <div id="pro-list">${lista(filtradosMios, {}, ui.proSearch ? 'Sin coincidencias para tu búsqueda.' : 'Aún no has registrado prospectos. Toca "+ Registrar".')}</div>`;
+        <div id="pro-list">${lista(filtradosMios, {}, ui.proSearch ? 'Sin coincidencias para tu búsqueda.' : `Sin prospectos registrados en ${rango.etiquetaCorta}. Toca "+ Registrar" o cambia el período.`)}</div>`;
     }
-    return `<section class="kpis four">
-        <div class="kpi"><b>${mios.length}</b><span>Mis prospectos</span></div>
-        <div class="kpi amber"><b>${activos.length}</b><span>En proceso</span></div>
-        <div class="kpi green"><b>${ganados.length}</b><span>Desembolsados</span></div>
-        <div class="kpi lime"><b>${money(montoGanado)}</b><span>Mi colocación</span></div>
+    return `${tab !== 'nuevo' && tab !== 'csv' ? barraPeriodoHTML(todosMios) : ''}
+      <section class="kpis four">
+        <div class="kpi"><b>${m.total}</b><span>Mis prospectos</span>${cmp ? deltaHTML(cmp.deltaTotal, cmp.etiqueta) : ''}</div>
+        <div class="kpi amber"><b>${activos.length}</b><span>En proceso</span><small class="kpi-sub">${m.calificados} calificados</small></div>
+        <div class="kpi green"><b>${m.desembolsados}</b><span>Desembolsados</span>${cmp ? deltaHTML(cmp.deltaDesembolsados, cmp.etiqueta) : ''}${m.desembolsosArrastre ? `<small class="kpi-sub">+${m.desembolsosArrastre} de mes anterior</small>` : ''}</div>
+        <div class="kpi lime"><b>${money(m.montoColocado)}</b><span>Mi colocación</span>${cmp ? deltaHTML(cmp.deltaMonto, cmp.etiqueta, true) : ''}</div>
       </section>
-      ${tabs('pro', [['mis', 'Mis Prospectos', mios.length], ['nuevo', '+ Registrar'], ['csv', '📥 Importar CSV'], ['ganados', 'Ganados', ganados.length]])}
+      ${tabs('pro', [['mis', 'Mis Prospectos', mios.length], ['nuevo', '+ Registrar'], ['csv', '📥 Importar CSV'], ['ganados', 'Ganados', ganados.length], ['metricas', '📈 Mis Métricas']])}
       ${body}`;
   }
 
   function vistaCallCenter(u) {
-    const todos = C.visibles(S, u);
+    const todosBase = C.visibles(S, u);
+    const rango = getPeriodoActivo();
+    const todos = C.filtrarPorPeriodo(todosBase, rango, { campo: 'creado' });
+    const m = C.metricas(S, { prospectos: todosBase, periodo: rango, incluirComparativo: true });
+    const cmp = m.comparativo;
     const cola = todos.filter((p) => p.estado === 'nuevo').length;
     const gest = todos.filter((p) => p.estado === 'gestion').length;
     const pesc = todos.filter((p) => p.estado === 'pescado').length;
-    const desem = todos.filter((p) => p.estado === 'desembolsado').length;
     const directos = todos.filter((p) => C.esCallCenterDirecto(p)).length;
     const tab = tabActual('cc', 'bandeja');
     const tcs = S.config.tiposCredito || ['NV(NUEVO)', 'RC(REC.INACTIVO)', 'RP(REPRESTAMO)'];
@@ -1127,6 +1329,8 @@
       }
     } else if (tab === 'csv') {
       body = vistaDepuradorCSV(u);
+    } else if (tab === 'metricas') {
+      body = panelMetricasFechaHTML(todosBase, { titulo: '📈 Métricas Call Center por Fecha y Cantidades', showAgentTable: true, currentUser: u });
     } else {
       body = `<div class="toolbar-row">
           <div class="quick" style="margin:0">
@@ -1139,64 +1343,80 @@
           ${viewSwitcherHTML()}
         </div>
         ${filtrosHTML()}
-        <div id="list">${prospectosViewHTML(filtrar(todos))}</div>`;
+        <div id="list">${prospectosViewHTML(filtrar(todosBase))}</div>`;
     }
 
-    return `<section class="kpis four">
-        <div class="kpi"><b>${cola}</b><span>En cola</span></div>
-        <div class="kpi amber"><b>${gest}</b><span>En gestión</span></div>
-        <div class="kpi lime"><b>${pesc}</b><span>Pescados / Directos</span></div>
-        <div class="kpi green"><b>${desem}</b><span>Desembolsados</span></div>
+    return `${tab !== 'captura' && tab !== 'csv' ? barraPeriodoHTML(todosBase) : ''}
+      <section class="kpis four">
+        <div class="kpi"><b>${cola}</b><span>En cola</span><small class="kpi-sub">${m.total} captados${cmp ? ` (${cmp.deltaTotal >= 0 ? '+' : ''}${cmp.deltaTotal} vs ${h(cmp.etiqueta)})` : ''}</small></div>
+        <div class="kpi amber"><b>${gest}</b><span>En gestión</span><small class="kpi-sub">${directos} directo(s) CC</small></div>
+        <div class="kpi lime"><b>${m.calificados}</b><span>Pescados / Directos</span>${cmp ? deltaHTML(cmp.deltaCalificados, cmp.etiqueta) : ''}</div>
+        <div class="kpi green"><b>${m.desembolsados}</b><span>Desembolsados</span>${cmp ? deltaHTML(cmp.deltaDesembolsados, cmp.etiqueta) : ''}</div>
       </section>
-      ${tabs('cc', [['bandeja', '📞 Bandeja de Llamadas', cola + gest], ['captura', '📝 Captura Call Center'], ['csv', '📥 Depurador CSV']])}
+      ${tabs('cc', [['bandeja', '📞 Bandeja de Llamadas', cola + gest], ['captura', '📝 Captura Call Center'], ['csv', '📥 Depurador CSV'], ['metricas', '📈 Métricas CC']])}
       ${body}`;
   }
 
   function vistaGerente(u) {
-    const todosSuc = C.visibles(S, u);
-    const mios = !ui.gerOrigen
-      ? todosSuc
-      : todosSuc.filter((p) => (ui.gerOrigen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p)));
+    const todosSucBase = C.visibles(S, u);
+    const rango = getPeriodoActivo();
+    const todosSuc = C.filtrarPorPeriodo(todosSucBase, rango, { campo: 'creado' });
+    const todosSucOp = C.filtrarPorPeriodo(todosSucBase, rango, { campo: 'operativo' });
+    const desemSuc = C.filtrarPorPeriodo(todosSucBase, rango, { campo: 'desembolso' });
+    const miosBase = !ui.gerOrigen
+      ? todosSucBase
+      : todosSucBase.filter((p) => (ui.gerOrigen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p)));
+    const mios = C.filtrarPorPeriodo(miosBase, rango, { campo: 'operativo' });
+    const desem = C.filtrarPorPeriodo(miosBase, rango, { campo: 'desembolso' });
+    const m = C.metricas(S, { prospectos: miosBase, periodo: rango, incluirComparativo: true });
+    const cmp = m.comparativo;
     const pesc = mios.filter((p) => p.estado === 'pescado');
     const seg = mios.filter((p) => p.estado === 'seguimiento');
-    const desem = mios.filter((p) => p.estado === 'desembolsado');
-    const ccDirectosTotal = todosSuc.filter((p) => C.esCallCenterDirecto(p)).length;
-    const montoSuc = desem.reduce((a, p) => a + Number((p.desembolso && p.desembolso.monto) || p.monto || 0), 0);
+    const ccDirectosTotal = todosSucOp.filter((p) => C.esCallCenterDirecto(p)).length;
     const emailGer = (S.config.emailsGerentes && S.config.emailsGerentes[u.sucursal]) || u.email || 'alfacreditenrique@gmail.com';
     const equipo = S.usuarios.filter((x) => x.sucursal === u.sucursal && x.activo && ['promotor', 'gestor'].includes(x.rol));
     const tab = tabActual('ger', 'pescados');
 
     const origenFilterBar = `<div class="quick" style="margin-bottom:10px">
-      <button type="button" class="chip ${!ui.gerOrigen ? 'on' : ''}" data-action="ger-origen" data-val="">Todos (${todosSuc.length})</button>
+      <button type="button" class="chip ${!ui.gerOrigen ? 'on' : ''}" data-action="ger-origen" data-val="">Todos (${todosSucOp.length})</button>
       <button type="button" class="chip ${ui.gerOrigen === 'callcenter_directo' ? 'on' : ''}" data-action="ger-origen" data-val="callcenter_directo">📞 Directo Call Center (${ccDirectosTotal})</button>
-      <button type="button" class="chip ${ui.gerOrigen === 'promotor' ? 'on' : ''}" data-action="ger-origen" data-val="promotor">🔒 Con Promotor (${todosSuc.length - ccDirectosTotal})</button>
+      <button type="button" class="chip ${ui.gerOrigen === 'promotor' ? 'on' : ''}" data-action="ger-origen" data-val="promotor">🔒 Con Promotor (${todosSucOp.length - ccDirectosTotal})</button>
     </div>`;
 
     let body;
-    if (tab === 'pescados') body = origenFilterBar + lista(pesc, { sello: true }, 'No hay clientes pescados pendientes. ✔');
-    else if (tab === 'seguimiento') body = origenFilterBar + lista(seg, { sello: true }, 'No hay casos en seguimiento.');
-    else if (tab === 'equipo') {
+    if (tab === 'pescados') body = origenFilterBar + lista(pesc, { sello: true }, `No hay clientes pescados pendientes en ${rango.etiquetaCorta}. ✔`);
+    else if (tab === 'seguimiento') body = origenFilterBar + lista(seg, { sello: true }, `No hay casos en seguimiento en ${rango.etiquetaCorta}.`);
+    else if (tab === 'metricas') {
+      const maxEst = Math.max(1, ...Object.values(m.porEstado));
       body = `<div class="panel">
-        <h3>👥 Equipo Comercial — Sucursal ${h(u.sucursal)} (${equipo.length} integrantes)</h3>
+          <h3>Embudo Sucursal ${h(u.sucursal)} — <small>${h(rango.etiqueta)}</small></h3>
+          ${C.ESTADOS.map((e) => `<div class="hbar"><span>${h(est(e))}</span><div><i class="b-${SEM[e]}" style="width:${(m.porEstado[e] / maxEst) * 100}%"></i></div><b class="tnum">${m.porEstado[e]}</b></div>`).join('')}
+        </div>
+        ${panelMetricasFechaHTML(miosBase, { titulo: `📈 Métricas por Fecha — Sucursal ${u.sucursal}`, currentUser: u })}`;
+    } else if (tab === 'equipo') {
+      body = `<div class="panel">
+        <h3>👥 Equipo Comercial — Sucursal ${h(u.sucursal)} (${equipo.length} integrantes · <small>${h(rango.etiqueta)}</small>)</h3>
         <div class="table-wrap"><table class="table">
           <thead><tr><th>Nombre</th><th>Rol</th><th>Usuario</th><th>Origen / Asignados</th><th>CC Directo Asign.</th><th>Desembolsados</th><th>Monto Colocado</th></tr></thead>
           <tbody>${equipo.map((x) => {
             const pros = x.rol === 'promotor'
               ? todosSuc.filter((p) => p.promotor_origen_id === x.id || p.asignadoPromotorId === x.id)
-              : todosSuc.filter((p) => p.gestorId === x.id);
+              : todosSucOp.filter((p) => p.gestorId === x.id);
             const ccAsig = x.rol === 'promotor'
-              ? todosSuc.filter((p) => C.esCallCenterDirecto(p) && p.asignadoPromotorId === x.id).length
-              : todosSuc.filter((p) => C.esCallCenterDirecto(p) && p.gestorId === x.id).length;
-            const gan = pros.filter((p) => p.estado === 'desembolsado');
-            const m = gan.reduce((a, p) => a + Number((p.desembolso && p.desembolso.monto) || 0), 0);
+              ? todosSucOp.filter((p) => C.esCallCenterDirecto(p) && p.asignadoPromotorId === x.id).length
+              : todosSucOp.filter((p) => C.esCallCenterDirecto(p) && p.gestorId === x.id).length;
+            const gan = x.rol === 'promotor'
+              ? desemSuc.filter((p) => p.promotor_origen_id === x.id || p.asignadoPromotorId === x.id)
+              : desemSuc.filter((p) => p.gestorId === x.id);
+            const mCol = gan.reduce((a, p) => a + Number((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto || 0), 0);
             return `<tr>
               <td><b>${h(x.nombre)}</b></td>
               <td><span class="badge ${x.rol === 'promotor' ? 'b-green' : 'b-blue'}">${h(C.ROLES[x.rol])}</span></td>
               <td><code>${h(x.username)}</code></td>
               <td class="tnum">${pros.length}</td>
               <td class="tnum">${ccAsig}</td>
-              <td class="tnum">${gan.length}</td>
-              <td class="money">${money(m)}</td>
+              <td class="tnum"><b>${gan.length}</b></td>
+              <td class="money">${money(mCol)}</td>
             </tr>`;
           }).join('')}</tbody>
         </table></div>
@@ -1207,30 +1427,40 @@
     }
 
     return `<div class="row" style="margin-bottom:8px"><h2 class="title" style="margin:0">Sucursal ${h(u.sucursal)}</h2><span class="badge b-blue">✉️ ${h(emailGer)}</span></div>
+      ${barraPeriodoHTML(todosSucBase)}
       <section class="kpis four">
-        <div class="kpi lime"><b>${pesc.length}</b><span>Pescados / Por distribuir</span></div>
-        <div class="kpi blue"><b>${seg.length}</b><span>En seguimiento</span></div>
-        <div class="kpi green"><b>${desem.length}</b><span>Desembolsados</span></div>
-        <div class="kpi"><b>${money(montoSuc)}</b><span>Monto sucursal</span></div>
+        <div class="kpi lime"><b>${pesc.length}</b><span>Pescados / Por distribuir</span><small class="kpi-sub">${m.total} captados${cmp ? ` (${cmp.deltaTotal >= 0 ? '+' : ''}${cmp.deltaTotal} vs ${h(cmp.etiqueta)})` : ''}</small></div>
+        <div class="kpi blue"><b>${seg.length}</b><span>En seguimiento</span><small class="kpi-sub">${m.calificados} calificados</small></div>
+        <div class="kpi green"><b>${desem.length}</b><span>Desembolsados</span>${cmp ? deltaHTML(cmp.deltaDesembolsados, cmp.etiqueta) : ''}${m.desembolsosArrastre ? `<small class="kpi-sub">+${m.desembolsosArrastre} de mes anterior</small>` : ''}</div>
+        <div class="kpi"><b>${money(m.montoColocado)}</b><span>Monto sucursal</span>${cmp ? deltaHTML(cmp.deltaMonto, cmp.etiqueta, true) : ''}</div>
       </section>
-      ${tabs('ger', [['pescados', 'Clientes Pescados por Call Center', pesc.length], ['seguimiento', 'En seguimiento', seg.length], ['todos', 'Pipeline / Todos', mios.length], ['equipo', '👥 Mi Equipo', equipo.length]])}
+      ${tabs('ger', [['pescados', 'Clientes Pescados por Call Center', pesc.length], ['seguimiento', 'En seguimiento', seg.length], ['todos', 'Pipeline / Todos', mios.length], ['equipo', '👥 Mi Equipo', equipo.length], ['metricas', '📈 Métricas']])}
       ${body}`;
   }
 
   function vistaGestor(u) {
-    const mios = C.visibles(S, u);
+    const todosBase = C.visibles(S, u);
+    const rango = getPeriodoActivo();
+    const mios = C.filtrarPorPeriodo(todosBase, rango, { campo: 'operativo' });
     const act = mios.filter((p) => p.estado === 'seguimiento');
-    const gan = mios.filter((p) => p.estado === 'desembolsado');
+    const gan = C.filtrarPorPeriodo(todosBase, rango, { campo: 'desembolso' });
+    const m = C.metricas(S, { prospectos: todosBase, periodo: rango, incluirComparativo: true });
+    const cmp = m.comparativo;
     const tab = tabActual('ges', 'act');
+    const body = tab === 'metricas'
+      ? panelMetricasFechaHTML(todosBase, { titulo: '📈 Mis Métricas de Evaluación y Cierre', currentUser: u })
+      : lista(tab === 'act' ? act : mios, { sello: true }, `No tienes casos asignados en ${rango.etiquetaCorta}.`);
     return `<h2 class="title">Casos de apoyo / evaluación — ${h(u.sucursal)}</h2>
       <p class="hint">Apoyas el cierre y evaluación en campo; el crédito siempre conserva el <b>Promotor de Origen</b> 🔒.</p>
-      <section class="kpis">
+      ${barraPeriodoHTML(todosBase)}
+      <section class="kpis four">
         <div class="kpi blue"><b>${act.length}</b><span>Por evaluar</span></div>
-        <div class="kpi green"><b>${gan.length}</b><span>Desembolsados</span></div>
+        <div class="kpi green"><b>${gan.length}</b><span>Desembolsados</span>${cmp ? deltaHTML(cmp.deltaDesembolsados, cmp.etiqueta) : ''}</div>
+        <div class="kpi lime"><b>${money(m.montoColocado)}</b><span>Monto cerrado</span>${cmp ? deltaHTML(cmp.deltaMonto, cmp.etiqueta, true) : ''}</div>
         <div class="kpi"><b>${mios.length}</b><span>Total asignados</span></div>
       </section>
-      ${tabs('ges', [['act', 'Por evaluar', act.length], ['todos', 'Historial', mios.length]])}
-      ${lista(tab === 'act' ? act : mios, { sello: true }, 'No tienes casos asignados.')}`;
+      ${tabs('ges', [['act', 'Por evaluar', act.length], ['todos', 'Historial', mios.length], ['metricas', '📈 Mis Métricas']])}
+      ${body}`;
   }
 
   function vistaBaseDatos() {
@@ -1381,9 +1611,11 @@
 
   function vistaAdmin(u) {
     const tab = tabActual('adm', 'metricas');
+    const rango = getPeriodoActivo();
+    const prosPeriodo = C.filtrarPorPeriodo(S.prospectos, rango, { campo: 'creado' });
     const nav = tabs('adm', [
       ['metricas', '📊 Métricas'],
-      ['prospectos', '📋 Prospectos', S.prospectos.length],
+      ['prospectos', '📋 Prospectos', prosPeriodo.length],
       ['usuarios', '👥 Usuarios', S.usuarios.length],
       ['bd', '🗄️ Base de Datos'],
       ['csv', '📥 Depurador CSV'],
@@ -1392,28 +1624,30 @@
     ]);
     let body = '';
     if (tab === 'metricas') {
-      const m = C.metricas(S);
+      const m = C.metricas(S, { periodo: rango, incluirComparativo: true, granularidad: ui.periodo.granularidad || 'auto' });
+      const cmp = m.comparativo;
       const max = Math.max(1, ...Object.values(m.porEstado));
-      const monto = Object.values(m.porSucursal).reduce((a, x) => a + x.monto, 0);
-      body = `<section class="kpis four">
-          <div class="kpi"><b>${m.total}</b><span>Prospectos</span></div>
-          <div class="kpi green"><b>${m.porEstado.desembolsado}</b><span>Desembolsados</span></div>
-          <div class="kpi blue"><b>${m.conversion}%</b><span>Conversión</span></div>
-          <div class="kpi lime"><b>${money(monto)}</b><span>Monto colocado</span></div>
+      body = `${barraPeriodoHTML(S.prospectos)}
+        <section class="kpis four">
+          <div class="kpi"><b>${m.total}</b><span>Prospectos captados</span>${cmp ? deltaHTML(cmp.deltaTotal, cmp.etiqueta) : ''}</div>
+          <div class="kpi green"><b>${m.desembolsados}</b><span>Desembolsados</span>${cmp ? deltaHTML(cmp.deltaDesembolsados, cmp.etiqueta) : ''}${m.desembolsosArrastre ? `<small class="kpi-sub">+${m.desembolsosArrastre} de mes anterior</small>` : ''}</div>
+          <div class="kpi blue"><b>${m.tasaCierrePeriodo}%</b><span>Conversión período</span><small class="kpi-sub">${m.calificados} calificados</small></div>
+          <div class="kpi lime"><b>${money(m.montoColocado)}</b><span>Monto colocado</span>${cmp ? deltaHTML(cmp.deltaMonto, cmp.etiqueta, true) : ''}</div>
         </section>
+        ${panelMetricasFechaHTML(S.prospectos, { titulo: '📈 Avance Global por Fecha y Cantidades', showAgentTable: true, currentUser: u })}
         <div class="cols two">
-          <div class="panel"><h3>Embudo por estado</h3>${C.ESTADOS.map((e) => `<div class="hbar"><span>${h(est(e))}</span><div><i class="b-${SEM[e]}" style="width:${(m.porEstado[e] / max) * 100}%"></i></div><b class="tnum">${m.porEstado[e]}</b></div>`).join('')}</div>
+          <div class="panel"><h3>Embudo por estado — <small>${h(rango.etiquetaCorta)}</small></h3>${C.ESTADOS.map((e) => `<div class="hbar"><span>${h(est(e))}</span><div><i class="b-${SEM[e]}" style="width:${(m.porEstado[e] / max) * 100}%"></i></div><b class="tnum">${m.porEstado[e]}</b></div>`).join('')}</div>
           <div class="panel">
             <h3>Por Tipo de Crédito y Canal</h3>
-            ${Object.entries(m.porTipoCredito || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-blue" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b class="tnum">${v}</b></div>`).join('')}
+            ${Object.entries(m.porTipoCredito || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-blue" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b class="tnum">${v}</b></div>`).join('') || '<p class="hint">Sin registros en este período.</p>'}
             <hr style="border:0;border-top:1px solid var(--line);margin:10px 0">
             ${Object.entries(m.porPlataforma || {}).map(([k, v]) => `<div class="hbar"><span>${h(k)}</span><div><i class="b-green" style="width:${(v / Math.max(1, m.total)) * 100}%"></i></div><b class="tnum">${v}</b></div>`).join('')}
           </div>
         </div>
-        <div class="panel"><h3>Por sucursal</h3><div class="table-wrap"><table class="table"><thead><tr><th>Sucursal</th><th>Correo Gerencia</th><th>Prospectos</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
-          ${Object.entries(m.porSucursal).sort((a, b) => b[1].total - a[1].total).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td><small>${h((S.config.emailsGerentes && S.config.emailsGerentes[s]) || '—')}</small></td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>
-        <div class="panel"><h3>Ranking de promotores (comisión por origen)</h3><div class="table-wrap"><table class="table"><thead><tr><th>Promotor</th><th>Sucursal</th><th>Captados</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
-          ${Object.values(m.porPromotor).sort((a, b) => b.monto - a.monto || b.total - a.total).map((x) => `<tr><td>${originBadge({ promotor_nombre: x.nombre, sucursal: x.sucursal }, false)}</td><td>${h(x.sucursal)}</td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody></table></div></div>
+        <div class="panel"><h3>Por sucursal — <small>${h(rango.etiquetaCorta)}</small></h3><div class="table-wrap"><table class="table"><thead><tr><th>Sucursal</th><th>Correo Gerencia</th><th>Prospectos</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
+          ${Object.entries(m.porSucursal).sort((a, b) => b[1].total - a[1].total || b[1].monto - a[1].monto).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td><small>${h((S.config.emailsGerentes && S.config.emailsGerentes[s]) || '—')}</small></td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('') || '<tr><td colspan="5">Sin registros en este período.</td></tr>'}</tbody></table></div></div>
+        <div class="panel"><h3>Ranking de promotores (comisión por origen) — <small>${h(rango.etiquetaCorta)}</small></h3><div class="table-wrap"><table class="table"><thead><tr><th>Promotor</th><th>Sucursal</th><th>Captados</th><th>Desembolsados</th><th>Monto</th></tr></thead><tbody>
+          ${Object.values(m.porPromotor).sort((a, b) => b.monto - a.monto || b.total - a.total).map((x) => `<tr><td>${originBadge({ promotor_nombre: x.nombre, sucursal: x.sucursal }, false)}</td><td>${h(x.sucursal)}</td><td class="tnum">${x.total}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('') || '<tr><td colspan="5">Sin actividad de promotores en este período.</td></tr>'}</tbody></table></div></div>
         <div class="panel">
           <h3>📞 Trazabilidad Call Center Directo (Unificado con Google Sheets · Distribución por Gerencia)</h3>
           <section class="kpis four" style="margin-top:8px">
@@ -1422,7 +1656,7 @@
             <div class="kpi blue"><b>${m.callCenterDirecto.porEstado.seguimiento || 0}</b><span>En seguimiento</span></div>
             <div class="kpi green"><b>${m.callCenterDirecto.desembolsados} (${money(m.callCenterDirecto.montoDesembolsado)})</b><span>Desembolsados CC</span></div>
           </section>
-          ${m.callCenterDirecto.total ? `<div class="cols two">
+          ${m.callCenterDirecto.total || m.callCenterDirecto.desembolsados ? `<div class="cols two">
             <div class="table-wrap"><table class="table">
               <thead><tr><th>Sucursal (CC Directo)</th><th>Total</th><th>Pend.</th><th>Seguim.</th><th>Desemb.</th><th>Monto</th></tr></thead>
               <tbody>${Object.entries(m.callCenterDirecto.porSucursal).sort((a, b) => b[1].total - a[1].total).map(([s, x]) => `<tr><td><b>${h(s)}</b></td><td class="tnum">${x.total}</td><td class="tnum">${x.pendientes}</td><td class="tnum">${x.seguimiento}</td><td class="tnum">${x.desembolsado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody>
@@ -1431,10 +1665,11 @@
               <thead><tr><th>Agente Call Center</th><th>Captados</th><th>Seguim.</th><th>Desemb.</th><th>Deneg.</th><th>Monto</th></tr></thead>
               <tbody>${Object.values(m.callCenterDirecto.porAgente).sort((a, b) => b.total - a.total).map((x) => `<tr><td><b>${h(x.nombre)}</b></td><td class="tnum">${x.total}</td><td class="tnum">${x.seguimiento}</td><td class="tnum">${x.desembolsado}</td><td class="tnum">${x.descartado}</td><td class="money">${money(x.monto)}</td></tr>`).join('')}</tbody>
             </table></div>
-          </div>` : '<p class="hint" style="margin-top:8px">Aún no se han registrado nuevos casos directos de Call Center desde la unificación. Los nuevos casos creados desde la App Python o desde AlfaTrack aparecerán aquí con trazabilidad completa.</p>'}
+          </div>` : `<p class="hint" style="margin-top:8px">Sin casos directos de Call Center en ${h(rango.etiquetaCorta)}.</p>`}
         </div>`;
     } else if (tab === 'prospectos') {
-      body = `<div class="toolbar-row"><h3 style="margin:0">Pipeline Global (${S.prospectos.length})</h3>${viewSwitcherHTML()}</div>
+      body = `${barraPeriodoHTML(S.prospectos)}
+        <div class="toolbar-row"><h3 style="margin:0">Pipeline Global (${prosPeriodo.length} en ${h(rango.etiquetaCorta)})</h3>${viewSwitcherHTML()}</div>
         ${filtrosHTML()}
         <div id="list">${prospectosViewHTML(filtrar(S.prospectos))}</div>`;
     } else if (tab === 'usuarios') {
@@ -1688,50 +1923,61 @@
     const holder = $('#mobile-nav');
     if (!holder) return;
     if (!ui.autenticado || !u) { holder.innerHTML = ''; return; }
+    const rango = getPeriodoActivo();
     let key = '', items = [], fab = null;
     if (u.rol === 'promotor') {
       key = 'pro';
       const cur = tabActual('pro', 'mis');
-      const mios = C.visibles(S, u);
-      const gan = mios.filter((p) => p.estado === 'desembolsado').length;
+      const base = C.visibles(S, u);
+      const mios = C.filtrarPorPeriodo(base, rango, { campo: 'creado' });
+      const gan = C.filtrarPorPeriodo(base, rango, { campo: 'desembolso' }).length;
       items = [
         ['mis', '📋', 'Mis Leads', mios.length],
         ['nuevo', '➕', 'Registrar'],
         ['csv', '📥', 'CSV'],
         ['ganados', '🏆', 'Ganados', gan],
+        ['metricas', '📈', 'Métricas'],
       ];
       if (cur !== 'nuevo') fab = { key: 'pro', val: 'nuevo', label: '+ Nuevo' };
     } else if (u.rol === 'callcenter') {
       key = 'cc';
       const cur = tabActual('cc', 'bandeja');
-      const cola = C.visibles(S, u).filter((p) => p.estado === 'nuevo' || p.estado === 'gestion').length;
+      const cola = C.filtrarPorPeriodo(C.visibles(S, u), rango, { campo: 'creado' }).filter((p) => p.estado === 'nuevo' || p.estado === 'gestion').length;
       items = [
         ['bandeja', '📞', 'Bandeja', cola],
         ['captura', '📝', 'Capturar'],
         ['csv', '📥', 'CSV'],
+        ['metricas', '📈', 'Métricas'],
       ];
       if (cur !== 'captura') fab = { key: 'cc', val: 'captura', label: '+ Capturar' };
     } else if (u.rol === 'gerente') {
       key = 'ger';
-      const mios = C.visibles(S, u);
+      const baseGer = C.visibles(S, u);
+      const miosGer = !ui.gerOrigen
+        ? baseGer
+        : baseGer.filter((p) => (ui.gerOrigen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p)));
+      const mios = C.filtrarPorPeriodo(miosGer, rango, { campo: 'operativo' });
       items = [
         ['pescados', '🐟', 'Pescados', mios.filter((p) => p.estado === 'pescado').length],
         ['seguimiento', '📌', 'Seguim.', mios.filter((p) => p.estado === 'seguimiento').length],
         ['todos', '📊', 'Pipeline'],
         ['equipo', '👥', 'Equipo'],
+        ['metricas', '📈', 'Métricas'],
       ];
     } else if (u.rol === 'gestor') {
       key = 'ges';
-      const mios = C.visibles(S, u);
+      const mios = C.filtrarPorPeriodo(C.visibles(S, u), rango, { campo: 'operativo' });
       items = [
         ['act', '📋', 'Evaluar', mios.filter((p) => p.estado === 'seguimiento').length],
         ['todos', '🕒', 'Historial', mios.length],
+        ['metricas', '📈', 'Métricas'],
       ];
     } else if (u.rol === 'admin') {
       key = 'adm';
+      const cntPeriodo = C.filtrarPorPeriodo(S.prospectos, rango, { campo: 'creado' }).length;
       items = [
         ['metricas', '📊', 'Métricas'],
-        ['prospectos', '📋', 'Leads', S.prospectos.length],
+        ['prospectos', '📋', 'Leads', cntPeriodo],
         ['usuarios', '👥', 'Usuarios'],
         ['bd', '🗄️', 'Turso BD'],
         ['config', '⚙️', 'Config'],
@@ -1812,7 +2058,13 @@
     const u = me();
     if (!el || !u) return;
     const base = u.rol === 'admin' ? S.prospectos : C.visibles(S, u);
-    const items = u.rol === 'gerente' ? base : filtrar(base);
+    const items = u.rol === 'gerente'
+      ? C.filtrarPorPeriodo(
+        !ui.gerOrigen ? base : base.filter((p) => (ui.gerOrigen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p))),
+        getPeriodoActivo(),
+        { campo: 'operativo' }
+      )
+      : filtrar(base);
     el.innerHTML = prospectosViewHTML(items, u.rol === 'gerente' ? { sello: true } : {});
   };
 
@@ -1820,8 +2072,9 @@
     const el = $('#pro-list');
     const u = me();
     if (!el || !u) return;
+    const rango = getPeriodoActivo();
     const filtradosMios = filtrarPromotor(u);
-    el.innerHTML = lista(filtradosMios, {}, ui.proSearch ? 'Sin coincidencias para tu búsqueda.' : 'Aún no has registrado prospectos. Toca "+ Registrar".');
+    el.innerHTML = lista(filtradosMios, {}, ui.proSearch ? 'Sin coincidencias para tu búsqueda.' : `Sin prospectos registrados en ${rango.etiquetaCorta}. Toca "+ Registrar" o cambia el período.`);
   };
 
   const refrescarUsuarios = () => {
@@ -1931,6 +2184,55 @@
         if (el.dataset.key === 'adm' && el.dataset.val === 'config' && !ui.ccSyncStatus) fetchCcSyncStatus();
         render();
         break;
+      case 'periodo-tipo': {
+        const val = el.dataset.val || 'mes';
+        const prevR = getPeriodoActivo();
+        ui.periodo.tipo = val;
+        if (val === 'mes') ui.periodo.mes = '';
+        if (val === 'rango') {
+          const curM = C.rangoPeriodo({ tipo: 'mes' });
+          const hoy = C.rangoPeriodo({ tipo: 'hoy' });
+          ui.periodo.desde = ui.periodo.desde || prevR.desde || curM.desde;
+          ui.periodo.hasta = ui.periodo.hasta || prevR.hasta || hoy.hasta;
+          ui.f.desde = ui.periodo.desde;
+          ui.f.hasta = ui.periodo.hasta;
+        } else {
+          ui.periodo.desde = '';
+          ui.periodo.hasta = '';
+          ui.f.desde = '';
+          ui.f.hasta = '';
+        }
+        render();
+        break;
+      }
+      case 'periodo-gran':
+        ui.periodo.granularidad = ['dia', 'semana', 'mes'].includes(el.dataset.val) ? el.dataset.val : 'auto';
+        render();
+        break;
+      case 'periodo-ir-mes':
+        if (el.dataset.val) {
+          ui.periodo.tipo = 'mes';
+          ui.periodo.mes = el.dataset.val;
+          ui.periodo.desde = '';
+          ui.periodo.hasta = '';
+          ui.f.desde = '';
+          ui.f.hasta = '';
+          render();
+        }
+        break;
+      case 'exportar-metricas-csv': {
+        if (!u) break;
+        let base = u.rol === 'admin' ? S.prospectos : C.visibles(S, u);
+        if (u.rol === 'gerente' && ui.gerOrigen) {
+          base = base.filter((p) => (ui.gerOrigen === 'callcenter_directo' ? C.esCallCenterDirecto(p) : !C.esCallCenterDirecto(p)));
+        }
+        const rango = getPeriodoActivo();
+        const ser = C.seriesTemporales(base, { periodo: rango, granularidad: ui.periodo.granularidad || 'auto' });
+        const rows = ser.items.map((x) => [x.clave, x.etiqueta, x.captados, x.calificados, x.seguimiento, x.desembolsados, x.descartados, `${x.conversion}%`, x.montoSolicitado, x.montoDesembolsado]);
+        downloadCSV(`Metricas_${rango.tipo}_${rango.mes || rango.desde || 'historico'}.csv`, ['Clave', 'Período', 'Captados', 'Pescados / Calificados', 'En Seguimiento', 'Desembolsados', 'Descartados', 'Conversión', 'Monto Solicitado (C$)', 'Monto Colocado (C$)'], rows);
+        toast(`Métricas CSV (${rango.etiquetaCorta}) descargadas.`, 'ok');
+        break;
+      }
       case 'cc-modo':
         ui.ccModo = el.dataset.val === 'promotor' ? 'promotor' : 'directo';
         render();
@@ -2147,7 +2449,13 @@
       }
       case 'qf': ui.f.estado = el.dataset.val; ui.f.origen = ''; render(); break;
       case 'pf': ui.proFilter = el.dataset.val; render(); break;
-      case 'limpiar-filtros': ui.f = { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' }; render(); break;
+      case 'limpiar-filtros':
+        ui.f = { sucursal: '', estado: '', origen: '', tipoCredito: '', plataforma: '', desde: '', hasta: '', q: '' };
+        if (ui.periodo.tipo === 'rango') {
+          ui.periodo = { tipo: 'mes', mes: '', desde: '', hasta: '', granularidad: ui.periodo.granularidad || 'auto' };
+        }
+        render();
+        break;
       case 'reset':
         if (confirm('Esto restablece la base de datos inicial. ¿Continuar?')) {
           await mutate('reset', {}, () => { S = C.seed(); return { ok: true }; }, 'Base de datos restablecida.', {
@@ -2165,7 +2473,41 @@
       const emailInp = t.form && t.form.querySelector('#cc-email-gerente');
       if (emailInp) emailInp.value = (S.config.emailsGerentes && S.config.emailsGerentes[t.value]) || 'alfacreditenrique@gmail.com';
     }
-    else if (t.form && t.form.dataset.form === 'filtros' && t.name !== 'q') { ui.f[t.name] = t.value; render(); }
+    else if (t.dataset.change === 'periodo-mes') {
+      ui.periodo.tipo = 'mes';
+      ui.periodo.mes = t.value || '';
+      ui.periodo.desde = '';
+      ui.periodo.hasta = '';
+      ui.f.desde = '';
+      ui.f.hasta = '';
+      render();
+    }
+    else if (t.dataset.change === 'periodo-desde') {
+      ui.periodo.desde = t.value;
+      ui.f.desde = t.value;
+      ui.periodo.tipo = (ui.periodo.desde || ui.periodo.hasta) ? 'rango' : 'todo';
+      render();
+    }
+    else if (t.dataset.change === 'periodo-hasta') {
+      ui.periodo.hasta = t.value;
+      ui.f.hasta = t.value;
+      ui.periodo.tipo = (ui.periodo.desde || ui.periodo.hasta) ? 'rango' : 'todo';
+      render();
+    }
+    else if (t.form && t.form.dataset.form === 'filtros' && t.name !== 'q') {
+      ui.f[t.name] = t.value;
+      if (t.name === 'desde' || t.name === 'hasta') {
+        const curR = getPeriodoActivo();
+        const nextDesde = t.name === 'desde' ? t.value : (curR.desde || '');
+        const nextHasta = t.name === 'hasta' ? t.value : (curR.hasta || '');
+        ui.periodo.desde = nextDesde;
+        ui.periodo.hasta = nextHasta;
+        ui.f.desde = nextDesde;
+        ui.f.hasta = nextHasta;
+        ui.periodo.tipo = (nextDesde || nextHasta) ? 'rango' : 'todo';
+      }
+      render();
+    }
     else if (t.dataset.change === 'user-role') { ui.userRoleFilter = t.value; render(); }
     else if (t.dataset.change === 'user-branch') { ui.userBranchFilter = t.value; render(); }
     else if (t.dataset.change === 'csv-file' && t.files && t.files[0]) {
@@ -2595,7 +2937,7 @@
   });
 
   if ('serviceWorker' in navigator && isHttp()) {
-    navigator.serviceWorker.register('sw.js?v=11', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=12', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
 
   render();

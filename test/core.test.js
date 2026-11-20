@@ -603,5 +603,153 @@ test('memory & payload bounds: auditoria and notificaciones cap at 500 while pre
   assert.ok(s.notificaciones.some((n) => n.id === r.notificaciones[0].id), 'newest unread notification preserved');
 });
 
+test('period & calendar engine: Nicaragua UTC-6 boundaries, 1st-of-month clean reset, carry-over & cross-month disbursement', () => {
+  const s = fresh();
+  s.prospectos = []; // isolate exact timestamps
+  const pro = U(s, 'u-pro-mga-lester');
+  const cc = U(s, 'u-cc-betsy');
+  const ger = U(s, 'u-ger-managua');
+  const ges = U(s, 'u-ges-mga-jamilton');
+
+  try {
+    // 1. Nicaragua UTC-6 boundary check: 2026-12-01T05:30:00Z is Nov 30 23:30 Managua -> November!
+    assert.strictEqual(C.fechaClave('2026-12-01T05:30:00.000Z'), '2026-11-30');
+    assert.strictEqual(C.mesClave('2026-12-01T05:30:00.000Z'), '2026-11');
+    // 2026-12-01T06:00:00Z is Dec 1 00:00 Managua -> December!
+    assert.strictEqual(C.fechaClave('2026-12-01T06:00:00.000Z'), '2026-12-01');
+    assert.strictEqual(C.mesClave('2026-12-01T06:00:00.000Z'), '2026-12');
+
+    // 2. Sunday belongs to the Monday-starting week (2026-11-22 is Sunday -> week starts Mon 2026-11-16)
+    assert.strictEqual(C.semanaClave('2026-11-22'), '2026-11-16');
+    assert.strictEqual(C.semanaClave('2026-11-16'), '2026-11-16');
+
+    // 3. Create prospects in October and November
+    C.setClock(() => new Date('2026-10-15T16:00:00.000Z')); // Oct 15 10:00 Managua
+    const pOct = C.crearProspecto(s, pro, datos({ nombre: 'Cliente Octubre', telefono: '81000001', monto: 10000 })).prospecto;
+    C.cambiarEstado(s, cc, pOct.id, 'pescado', { monto: 10000, rubro: 'Pulpería', direccionVisita: 'Managua', comentarios: 'OK' });
+    C.cambiarEstado(s, ger, pOct.id, 'seguimiento', { gestorId: ges.id, instrucciones: 'Cerrar' });
+    C.setClock(() => new Date('2026-10-20T16:00:00.000Z'));
+    C.cambiarEstado(s, ger, pOct.id, 'desembolsado', { monto: 10000 });
+
+    // Nov 29 lead still open on Dec 1 (carry-over pending)
+    C.setClock(() => new Date('2026-11-29T18:00:00.000Z'));
+    const pNovOpen = C.crearProspecto(s, pro, datos({ nombre: 'Cliente Nov Abierto', telefono: '81000002', monto: 18000 })).prospecto;
+    assert.strictEqual(pNovOpen.estado, 'nuevo');
+
+    // Nov 30 at 23:30 Managua (Dec 1 05:30 UTC) — must stay in November!
+    C.setClock(() => new Date('2026-12-01T05:30:00.000Z'));
+    const pNovLate = C.crearProspecto(s, pro, datos({ nombre: 'Cliente Nov 30 Noche', telefono: '81000003', monto: 25000 })).prospecto;
+    C.cambiarEstado(s, cc, pNovLate.id, 'pescado', { monto: 25000, rubro: 'Taller', direccionVisita: 'Bolonia', comentarios: 'Calificado' });
+    C.cambiarEstado(s, ger, pNovLate.id, 'seguimiento', { gestorId: ges.id, instrucciones: 'Evaluar' });
+
+    // 4. Now simulate the 1st of December at 08:00 Managua (2026-12-01T14:00:00Z):
+    // Current month ('mes') MUST start cleanly at 0 — previous months do NOT clutter December!
+    C.setClock(() => new Date('2026-12-01T14:00:00.000Z'));
+    const rDic = C.rangoPeriodo({ tipo: 'mes' });
+    assert.strictEqual(rDic.mes, '2026-12');
+    assert.strictEqual(rDic.esMesActual, true);
+    assert.strictEqual(rDic.desde, '2026-12-01');
+    assert.strictEqual(rDic.hasta, '2026-12-31');
+
+    const mDic1 = C.metricas(s, { periodo: rDic, incluirComparativo: true, granularidad: 'dia' });
+    assert.strictEqual(mDic1.total, 0, 'Dec 1 starts at 0 captados');
+    assert.strictEqual(mDic1.desembolsados, 0, 'Dec 1 starts at 0 desembolsados');
+    assert.strictEqual(mDic1.montoColocado, 0, 'Dec 1 starts at C$ 0');
+    assert.strictEqual(mDic1.comparativo.total, 2, 'Nov comparison shows 2 captados');
+    assert.strictEqual(mDic1.comparativo.deltaTotal, -2);
+
+    // Carry-over detector flags the 2 active open cases from November without polluting Dec metrics
+    const pend = C.pendientesAnteriores(s.prospectos, rDic);
+    assert.strictEqual(pend.length, 2);
+
+    // Previous month ('mes_anterior') accurately shows November's 2 leads
+    const rNov = C.rangoPeriodo({ tipo: 'mes_anterior' });
+    assert.strictEqual(rNov.mes, '2026-11');
+    const mNov = C.metricas(s, { periodo: rNov });
+    assert.strictEqual(mNov.total, 2);
+    assert.strictEqual(mNov.calificados, 1);
+
+    // 5. Cross-month disbursement: pNovLate (created Nov 30) is disbursed on Dec 2 -> counts in Dec desembolsados & montoColocado with arrastre = 1!
+    C.setClock(() => new Date('2026-12-02T16:00:00.000Z'));
+    C.cambiarEstado(s, ger, pNovLate.id, 'desembolsado', { monto: 25000 });
+    const pDicNuevo = C.capturarCasoCallCenterDirecto(s, cc, { nombre: 'Cliente Dic CC Directo', telefono: '81000004', sucursal: 'Managua', monto: 30000 }).prospecto;
+    assert.ok(pDicNuevo.id);
+
+    const mDic2 = C.metricas(s, { periodo: C.rangoPeriodo({ tipo: 'mes' }), incluirComparativo: true, granularidad: 'dia' });
+    assert.strictEqual(mDic2.total, 1, '1 lead captured in Dec');
+    assert.strictEqual(mDic2.desembolsados, 1, '1 credit disbursed in Dec');
+    assert.strictEqual(mDic2.desembolsosArrastre, 1, 'flagged as 1 disbursement from prior-month lead');
+    assert.strictEqual(mDic2.montoColocado, 25000);
+    assert.strictEqual(mDic2.porPromotor[pro.id].desembolsado, 1);
+    assert.strictEqual(mDic2.porPromotor[pro.id].monto, 25000);
+    assert.strictEqual(mDic2.porAgenteCC[cc.nombre].directos, 1);
+    assert.strictEqual(mDic2.porAgenteCC[cc.nombre].desembolsados, 1);
+    assert.strictEqual(mDic2.series.granularidad, 'dia');
+    assert.strictEqual(mDic2.series.items.length, 1);
+    assert.strictEqual(mDic2.series.items[0].clave, '2026-12-02');
+    assert.strictEqual(mDic2.series.items[0].captados, 1);
+    assert.strictEqual(mDic2.series.items[0].desembolsados, 1);
+    assert.strictEqual(mDic2.series.items[0].montoDesembolsado, 25000);
+
+    // 6. Monthly ledger (resumenMensual) shows Dec, Nov, Oct cleanly descending
+    const hist = C.resumenMensual(s.prospectos);
+    assert.deepStrictEqual(hist.map((x) => x.clave), ['2026-12', '2026-11', '2026-10']);
+    assert.strictEqual(hist[0].montoDesembolsado, 25000);
+    assert.strictEqual(hist[1].captados, 2);
+    assert.strictEqual(hist[2].montoDesembolsado, 10000);
+
+    // 7. Edge cases: Jan -> Dec year rollover, reversed custom range swap, empty list, invalid dates
+    C.setClock(() => new Date('2027-01-01T15:00:00.000Z'));
+    const rEnePrev = C.rangoPeriodo({ tipo: 'mes_anterior' });
+    assert.strictEqual(rEnePrev.mes, '2026-12');
+    assert.strictEqual(rEnePrev.anterior.mes, '2026-11');
+
+    const rSwap = C.rangoPeriodo({ tipo: 'rango', desde: '2026-11-20', hasta: '2026-11-10' });
+    assert.strictEqual(rSwap.desde, '2026-11-10');
+    assert.strictEqual(rSwap.hasta, '2026-11-20');
+
+    const emptySeries = C.seriesTemporales([], { periodo: rDic, granularidad: 'semana' });
+    assert.strictEqual(emptySeries.granularidad, 'semana');
+    assert.deepStrictEqual(emptySeries.items, []);
+    assert.strictEqual(C.fechaClave('not-a-date'), '');
+    assert.strictEqual(C.mesClave(''), '');
+
+    const meses = C.mesesDisponibles(s.prospectos);
+    assert.ok(meses.some((m) => m.key === '2027-01' && m.esActual));
+    assert.ok(meses.some((m) => m.key === '2026-12'));
+    assert.ok(meses.some((m) => m.key === '2026-10'));
+
+    // 8. Regression checks: bare YYYY-MM-DD in enRango/pendientesAnteriores, invalid refDate, operativo cross-month pescado/seguimiento, multi-year labels
+    assert.strictEqual(C.enRango('2026-12-01', rDic), true, 'bare YYYY-MM-DD on 1st of month must match that month in UTC-6');
+    assert.strictEqual(C.enRango('2026-12-01', rNov), false, 'bare YYYY-MM-DD on Dec 1 must not fall into November');
+    assert.strictEqual(C.pendientesAnteriores([{ estado: 'nuevo', creado: '2026-12-01' }], rDic).length, 0);
+    assert.strictEqual(C.rangoPeriodo({ tipo: 'mes', refDate: 'invalid-date' }).mes, '2027-01', 'invalid refDate falls back to clock');
+
+    // Cross-month qualification & assignment visibility via operativo without polluting Dec 1
+    C.setClock(() => new Date('2026-12-03T16:00:00.000Z'));
+    assert.strictEqual(C.filtrarPorPeriodo([pNovOpen], rDic, { campo: 'operativo' }).length, 0, 'untouched Nov lead stays out of Dec operativo');
+    C.cambiarEstado(s, cc, pNovOpen.id, 'pescado', { monto: 18000, rubro: 'Pulpería', direccionVisita: 'Managua', comentarios: 'Calificado en Dic' });
+    assert.strictEqual(C.filtrarPorPeriodo([pNovOpen], rDic, { campo: 'operativo' }).length, 1, 'Nov lead qualified in Dec appears in Dec operativo');
+    C.cambiarEstado(s, ger, pNovOpen.id, 'seguimiento', { gestorId: ges.id, instrucciones: 'Evaluar hoy' });
+    assert.strictEqual(C.fechaAsignado(pNovOpen).startsWith('2026-12-03'), true);
+    assert.strictEqual(C.filtrarPorPeriodo([pNovOpen], rDic, { campo: 'operativo' }).length, 1, 'Nov lead assigned in Dec appears in Gestor/Gerente Dec operativo');
+
+    // Multi-year series labels include year so same calendar days across years never collide
+    const serMulti = C.seriesTemporales([
+      { id: 'y1', creado: '2025-11-20T16:00:00.000Z', estado: 'nuevo', monto: 5000 },
+      { id: 'y2', creado: '2026-11-20T16:00:00.000Z', estado: 'nuevo', monto: 8000 },
+    ], { periodo: { tipo: 'todo' }, granularidad: 'dia' });
+    assert.deepStrictEqual(serMulti.items.map((x) => x.etiqueta), ['20 nov 2025', '20 nov 2026']);
+    const serMultiSem = C.seriesTemporales([
+      { id: 'y1', creado: '2025-11-20T16:00:00.000Z', estado: 'nuevo', monto: 5000 },
+      { id: 'y2', creado: '2026-11-20T16:00:00.000Z', estado: 'nuevo', monto: 8000 },
+    ], { periodo: { tipo: 'todo' }, granularidad: 'semana' });
+    assert.ok(serMultiSem.items[0].etiqueta.includes('2025') && serMultiSem.items[1].etiqueta.includes('2026'));
+  } finally {
+    C.setClock(null);
+  }
+});
+
+
 
 

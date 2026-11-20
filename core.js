@@ -1252,10 +1252,437 @@
     return { ok: true };
   }
 
-  function metricas(s) {
+  // ---------- calendar & period metrics (America/Managua UTC-6, no DST) ----------
+  const TZ_OFFSET_MS = -6 * 3600000;
+  const MESES_LARGO = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+  const MESES_CORTO = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const diasEnMes = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+
+  function parseFechaClave(str) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(str || '').trim());
+    if (!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    if (mo < 1 || mo > 12 || d < 1 || d > diasEnMes(y, mo)) return null;
+    return { y, m: mo, d, key: `${m[1]}-${m[2]}-${m[3]}` };
+  }
+
+  function parseMesClave(str) {
+    const m = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(String(str || '').trim());
+    if (!m) return null;
+    return { y: Number(m[1]), m: Number(m[2]), key: `${m[1]}-${m[2]}` };
+  }
+
+  function toManaguaParts(input) {
+    if (input === null || input === undefined || input === '') return null;
+    if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.trim())) {
+      const p = parseFechaClave(input);
+      if (!p) return null;
+      const dow = new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay();
+      return { y: p.y, m: p.m, d: p.d, dow, key: p.key, mesKey: `${p.y}-${pad2(p.m)}` };
+    }
+    const dt = input instanceof Date ? input : new Date(input);
+    const ms = dt.getTime();
+    if (Number.isNaN(ms)) return null;
+    const shifted = new Date(ms + TZ_OFFSET_MS);
+    const y = shifted.getUTCFullYear();
+    const m = shifted.getUTCMonth() + 1;
+    const d = shifted.getUTCDate();
+    const dow = shifted.getUTCDay();
+    return { y, m, d, dow, key: `${y}-${pad2(m)}-${pad2(d)}`, mesKey: `${y}-${pad2(m)}` };
+  }
+
+  const managuaStartMs = (y, m, d) => Date.UTC(y, m - 1, d, 6, 0, 0, 0);
+  const managuaEndMs = (y, m, d) => Date.UTC(y, m - 1, d, 6, 0, 0, 0) + 86400000 - 1;
+  const shiftDateParts = (y, m, d, deltaDays) => {
+    const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+    const yy = dt.getUTCFullYear(), mm = dt.getUTCMonth() + 1, dd = dt.getUTCDate();
+    return { y: yy, m: mm, d: dd, key: `${yy}-${pad2(mm)}-${pad2(dd)}` };
+  };
+  const shiftMonth = (y, m, deltaMonths) => {
+    const dt = new Date(Date.UTC(y, m - 1 + deltaMonths, 1));
+    const yy = dt.getUTCFullYear(), mm = dt.getUTCMonth() + 1;
+    return { y: yy, m: mm, key: `${yy}-${pad2(mm)}` };
+  };
+  const fmtDiaCorto = (y, m, d, conAnio) => `${pad2(d)} ${MESES_CORTO[m - 1]}${conAnio ? ' ' + y : ''}`;
+  const fmtMesLargo = (y, m) => `${MESES_LARGO[m - 1]} ${y}`;
+
+  function fechaClave(isoOrDate) {
+    const p = toManaguaParts(isoOrDate);
+    return p ? p.key : '';
+  }
+
+  function mesClave(isoOrDate) {
+    const p = toManaguaParts(isoOrDate);
+    return p ? p.mesKey : '';
+  }
+
+  function semanaClave(isoOrDate) {
+    const p = toManaguaParts(isoOrDate);
+    if (!p) return '';
+    const diffToMon = p.dow === 0 ? -6 : 1 - p.dow;
+    return shiftDateParts(p.y, p.m, p.d, diffToMon).key;
+  }
+
+  function etiquetaSemana(monKey, conAnio) {
+    const mon = parseFechaClave(monKey);
+    if (!mon) return monKey || '';
+    const sun = shiftDateParts(mon.y, mon.m, mon.d, 6);
+    const suf = conAnio ? ` ${sun.y}` : '';
+    if (mon.m === sun.m) return `Sem ${pad2(mon.d)}–${pad2(sun.d)} ${MESES_CORTO[mon.m - 1]}${suf}`;
+    return `Sem ${pad2(mon.d)} ${MESES_CORTO[mon.m - 1]}–${pad2(sun.d)} ${MESES_CORTO[sun.m - 1]}${suf}`;
+  }
+
+  function fechaDesembolso(p) {
+    if (!p || p.estado !== 'desembolsado') return '';
+    return (p.desembolso && p.desembolso.fecha) || p.actualizado || p.creado || '';
+  }
+
+  function fechaCalificado(p) {
+    if (!p) return '';
+    return (p.cc && p.cc.calificado) || '';
+  }
+
+  function fechaAsignado(p) {
+    if (!p) return '';
+    return (p.gerencia && p.gerencia.asignado) || '';
+  }
+
+  function parseTimestampMs(input) {
+    if (input === null || input === undefined || input === '') return NaN;
+    if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.trim())) {
+      const p = parseFechaClave(input);
+      return p ? managuaStartMs(p.y, p.m, p.d) : NaN;
+    }
+    const dt = input instanceof Date ? input : new Date(input);
+    return dt.getTime();
+  }
+
+  function rangoPeriodo(opts, _skipPrev) {
+    opts = opts || {};
+    const tipoRaw = String(opts.tipo || 'mes').trim().toLowerCase();
+    const tipo = ['hoy', 'semana', 'mes', 'mes_anterior', 'rango', 'todo'].includes(tipoRaw) ? tipoRaw : 'mes';
+    const ref = toManaguaParts(opts.refDate) || toManaguaParts(clock());
+
+    if (tipo === 'todo') {
+      return {
+        tipo: 'todo',
+        desde: '',
+        hasta: '',
+        startMs: null,
+        endMs: null,
+        mes: '',
+        esMesActual: false,
+        etiqueta: 'Histórico completo',
+        etiquetaCorta: 'Histórico',
+        anterior: null,
+      };
+    }
+
+    if (tipo === 'hoy') {
+      const prev = shiftDateParts(ref.y, ref.m, ref.d, -1);
+      return {
+        tipo: 'hoy',
+        desde: ref.key,
+        hasta: ref.key,
+        startMs: managuaStartMs(ref.y, ref.m, ref.d),
+        endMs: managuaEndMs(ref.y, ref.m, ref.d),
+        mes: ref.mesKey,
+        esMesActual: false,
+        etiqueta: `Hoy · ${fmtDiaCorto(ref.y, ref.m, ref.d, true)}`,
+        etiquetaCorta: 'Hoy',
+        anterior: _skipPrev ? null : {
+          tipo: 'rango',
+          desde: prev.key,
+          hasta: prev.key,
+          startMs: managuaStartMs(prev.y, prev.m, prev.d),
+          endMs: managuaEndMs(prev.y, prev.m, prev.d),
+          etiqueta: `Ayer (${fmtDiaCorto(prev.y, prev.m, prev.d)})`,
+        },
+      };
+    }
+
+    if (tipo === 'semana') {
+      const diffToMon = ref.dow === 0 ? -6 : 1 - ref.dow;
+      const mon = shiftDateParts(ref.y, ref.m, ref.d, diffToMon);
+      const sun = shiftDateParts(mon.y, mon.m, mon.d, 6);
+      const prevMon = shiftDateParts(mon.y, mon.m, mon.d, -7);
+      const prevSun = shiftDateParts(mon.y, mon.m, mon.d, -1);
+      return {
+        tipo: 'semana',
+        desde: mon.key,
+        hasta: sun.key,
+        startMs: managuaStartMs(mon.y, mon.m, mon.d),
+        endMs: managuaEndMs(sun.y, sun.m, sun.d),
+        mes: ref.mesKey,
+        esMesActual: false,
+        etiqueta: `Esta semana · ${fmtDiaCorto(mon.y, mon.m, mon.d)} – ${fmtDiaCorto(sun.y, sun.m, sun.d, true)}`,
+        etiquetaCorta: 'Esta semana',
+        anterior: _skipPrev ? null : {
+          tipo: 'rango',
+          desde: prevMon.key,
+          hasta: prevSun.key,
+          startMs: managuaStartMs(prevMon.y, prevMon.m, prevMon.d),
+          endMs: managuaEndMs(prevSun.y, prevSun.m, prevSun.d),
+          etiqueta: `Semana anterior (${fmtDiaCorto(prevMon.y, prevMon.m, prevMon.d)}–${fmtDiaCorto(prevSun.y, prevSun.m, prevSun.d)})`,
+        },
+      };
+    }
+
+    if (tipo === 'mes' || tipo === 'mes_anterior') {
+      const parsedMes = tipo === 'mes' ? parseMesClave(opts.mes) : null;
+      const target = tipo === 'mes_anterior'
+        ? shiftMonth(ref.y, ref.m, -1)
+        : (parsedMes || { y: ref.y, m: ref.m, key: ref.mesKey });
+      const lastDay = diasEnMes(target.y, target.m);
+      const desde = `${target.y}-${pad2(target.m)}-01`;
+      const hasta = `${target.y}-${pad2(target.m)}-${pad2(lastDay)}`;
+      const esMesActual = target.y === ref.y && target.m === ref.m;
+      const prevM = shiftMonth(target.y, target.m, -1);
+      const prevLast = diasEnMes(prevM.y, prevM.m);
+      return {
+        tipo,
+        desde,
+        hasta,
+        startMs: managuaStartMs(target.y, target.m, 1),
+        endMs: managuaEndMs(target.y, target.m, lastDay),
+        mes: target.key,
+        esMesActual,
+        etiqueta: `${fmtMesLargo(target.y, target.m)}${esMesActual ? ' (Mes actual)' : ''}`,
+        etiquetaCorta: fmtMesLargo(target.y, target.m),
+        anterior: _skipPrev ? null : {
+          tipo: 'mes',
+          mes: prevM.key,
+          desde: `${prevM.y}-${pad2(prevM.m)}-01`,
+          hasta: `${prevM.y}-${pad2(prevM.m)}-${pad2(prevLast)}`,
+          startMs: managuaStartMs(prevM.y, prevM.m, 1),
+          endMs: managuaEndMs(prevM.y, prevM.m, prevLast),
+          etiqueta: fmtMesLargo(prevM.y, prevM.m),
+        },
+      };
+    }
+
+    // Custom date range
+    let d1 = parseFechaClave(opts.desde);
+    let d2 = parseFechaClave(opts.hasta);
+    if (d1 && d2 && d1.key > d2.key) {
+      const tmp = d1; d1 = d2; d2 = tmp;
+    }
+    const startMs = d1 ? managuaStartMs(d1.y, d1.m, d1.d) : null;
+    const endMs = d2 ? managuaEndMs(d2.y, d2.m, d2.d) : null;
+    let anterior = null;
+    if (!_skipPrev && d1 && d2) {
+      const spanDays = Math.max(1, Math.round((endMs - startMs + 1) / 86400000));
+      const prevEnd = shiftDateParts(d1.y, d1.m, d1.d, -1);
+      const prevStart = shiftDateParts(d1.y, d1.m, d1.d, -spanDays);
+      anterior = {
+        tipo: 'rango',
+        desde: prevStart.key,
+        hasta: prevEnd.key,
+        startMs: managuaStartMs(prevStart.y, prevStart.m, prevStart.d),
+        endMs: managuaEndMs(prevEnd.y, prevEnd.m, prevEnd.d),
+        etiqueta: `${fmtDiaCorto(prevStart.y, prevStart.m, prevStart.d)}–${fmtDiaCorto(prevEnd.y, prevEnd.m, prevEnd.d)}`,
+      };
+    }
+    const etiqueta = d1 && d2
+      ? `${fmtDiaCorto(d1.y, d1.m, d1.d, true)} – ${fmtDiaCorto(d2.y, d2.m, d2.d, true)}`
+      : d1
+        ? `Desde ${fmtDiaCorto(d1.y, d1.m, d1.d, true)}`
+        : d2
+          ? `Hasta ${fmtDiaCorto(d2.y, d2.m, d2.d, true)}`
+          : 'Rango personalizado';
+    return {
+      tipo: 'rango',
+      desde: d1 ? d1.key : '',
+      hasta: d2 ? d2.key : '',
+      startMs,
+      endMs,
+      mes: d1 && d2 && d1.key.slice(0, 7) === d2.key.slice(0, 7) ? d1.key.slice(0, 7) : '',
+      esMesActual: false,
+      etiqueta,
+      etiquetaCorta: etiqueta,
+      anterior,
+    };
+  }
+
+  function enRango(iso, rango) {
+    if (!rango || rango.tipo === 'todo' || (rango.startMs === null && rango.endMs === null)) return true;
+    if (!iso) return false;
+    const ms = parseTimestampMs(iso);
+    if (Number.isNaN(ms)) return false;
+    if (rango.startMs !== null && ms < rango.startMs) return false;
+    if (rango.endMs !== null && ms > rango.endMs) return false;
+    return true;
+  }
+
+  function filtrarPorPeriodo(prospectos, rango, opts) {
+    const arr = Array.isArray(prospectos) ? prospectos : [];
+    const campo = (opts && opts.campo) || 'creado';
+    const sinFiltroFecha = !rango || rango.tipo === 'todo' || (rango.startMs === null && rango.endMs === null);
+    if (campo === 'desembolso') {
+      return arr.filter((p) => p && p.estado === 'desembolsado' && (sinFiltroFecha || enRango(fechaDesembolso(p), rango)));
+    }
+    if (sinFiltroFecha) return arr.slice();
+    if (campo === 'operativo') {
+      return arr.filter((p) => p && (
+        enRango(p.creado, rango) ||
+        enRango(fechaCalificado(p), rango) ||
+        enRango(fechaAsignado(p), rango) ||
+        (p.estado === 'desembolsado' && enRango(fechaDesembolso(p), rango))
+      ));
+    }
+    return arr.filter((p) => p && enRango(p.creado, rango));
+  }
+
+  function pendientesAnteriores(prospectos, rango) {
+    const arr = Array.isArray(prospectos) ? prospectos : [];
+    if (!rango || rango.startMs === null) return [];
+    return arr.filter((p) => {
+      if (!p || p.estado === 'desembolsado' || p.estado === 'descartado') return false;
+      const ms = parseTimestampMs(p.creado);
+      return !Number.isNaN(ms) && ms < rango.startMs;
+    });
+  }
+
+  function mesesDisponibles(prospectos, refDate) {
+    const ref = toManaguaParts(refDate) || toManaguaParts(clock());
+    const set = new Set();
+    if (ref) {
+      set.add(ref.mesKey);
+      set.add(shiftMonth(ref.y, ref.m, -1).key);
+    }
+    (Array.isArray(prospectos) ? prospectos : []).forEach((p) => {
+      if (!p) return;
+      [p.creado, fechaCalificado(p), fechaAsignado(p), fechaDesembolso(p)].forEach((f) => {
+        const mk = mesClave(f);
+        if (mk) set.add(mk);
+      });
+    });
+    return [...set].sort((a, b) => b.localeCompare(a)).map((key) => {
+      const pm = parseMesClave(key);
+      return { key, etiqueta: pm ? fmtMesLargo(pm.y, pm.m) : key, esActual: Boolean(ref && key === ref.mesKey) };
+    });
+  }
+
+  function resolverGranularidad(rango, granularidad) {
+    const g = String(granularidad || 'auto').toLowerCase();
+    if (['dia', 'semana', 'mes'].includes(g)) return g;
+    if (!rango || rango.tipo === 'todo') return 'mes';
+    if (rango.tipo === 'hoy' || rango.tipo === 'semana' || rango.tipo === 'mes' || rango.tipo === 'mes_anterior') return 'dia';
+    if (rango.startMs !== null && rango.endMs !== null) {
+      const days = Math.ceil((rango.endMs - rango.startMs + 1) / 86400000);
+      if (days <= 45) return 'dia';
+      if (days <= 180) return 'semana';
+      return 'mes';
+    }
+    return 'mes';
+  }
+
+  function seriesTemporales(prospectos, opts) {
+    opts = opts || {};
+    const arr = Array.isArray(prospectos) ? prospectos : [];
+    const rango = opts.periodo
+      ? (opts.periodo.startMs !== undefined ? opts.periodo : rangoPeriodo(opts.periodo))
+      : rangoPeriodo({ tipo: 'todo' });
+    const gran = resolverGranularidad(rango, opts.granularidad);
+    const keyFn = gran === 'dia' ? fechaClave : gran === 'semana' ? semanaClave : mesClave;
+    const labelFn = (k) => {
+      if (gran === 'dia') {
+        const p = parseFechaClave(k);
+        return p ? fmtDiaCorto(p.y, p.m, p.d, false) : k;
+      }
+      if (gran === 'semana') return etiquetaSemana(k);
+      const pm = parseMesClave(k);
+      return pm ? fmtMesLargo(pm.y, pm.m) : k;
+    };
+
+    const buckets = new Map();
+    const getBucket = (k) => {
+      if (!k) return null;
+      let b = buckets.get(k);
+      if (!b) {
+        b = {
+          clave: k,
+          etiqueta: labelFn(k),
+          captados: 0,
+          calificados: 0,
+          seguimiento: 0,
+          desembolsados: 0,
+          descartados: 0,
+          directosCC: 0,
+          montoSolicitado: 0,
+          montoDesembolsado: 0,
+          conversion: 0,
+        };
+        buckets.set(k, b);
+      }
+      return b;
+    };
+
+    arr.forEach((p) => {
+      if (!p) return;
+      if (enRango(p.creado, rango)) {
+        const b = getBucket(keyFn(p.creado));
+        if (b) {
+          b.captados++;
+          b.montoSolicitado += Number((p.cc && p.cc.monto) || p.monto || 0);
+          if (p.estado === 'seguimiento') b.seguimiento++;
+          if (p.estado === 'descartado') b.descartados++;
+          if (esCallCenterDirecto(p)) b.directosCC++;
+        }
+      }
+      const fCal = fechaCalificado(p) || (esCallCenterDirecto(p) ? p.creado : '');
+      if (fCal && enRango(fCal, rango)) {
+        const b = getBucket(keyFn(fCal));
+        if (b) b.calificados++;
+      }
+      if (p.estado === 'desembolsado') {
+        const fDes = fechaDesembolso(p);
+        if (fDes && enRango(fDes, rango)) {
+          const b = getBucket(keyFn(fDes));
+          if (b) {
+            b.desembolsados++;
+            b.montoDesembolsado += Number((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto || 0);
+          }
+        }
+      }
+    });
+
+    const items = [...buckets.values()].sort((a, b) => a.clave.localeCompare(b.clave));
+    const years = new Set(items.map((x) => String(x.clave || '').slice(0, 4)).filter(Boolean));
+    const multiYear = years.size > 1;
+    items.forEach((b) => {
+      if (multiYear && gran === 'dia') {
+        const p = parseFechaClave(b.clave);
+        if (p) b.etiqueta = fmtDiaCorto(p.y, p.m, p.d, true);
+      } else if (multiYear && gran === 'semana') {
+        b.etiqueta = etiquetaSemana(b.clave, true);
+      }
+      b.conversion = b.captados ? Math.min(100, Math.round((b.desembolsados / b.captados) * 100)) : 0;
+    });
+    return { granularidad: gran, items };
+  }
+
+  function resumenMensual(prospectos) {
+    const ser = seriesTemporales(prospectos, { periodo: rangoPeriodo({ tipo: 'todo' }), granularidad: 'mes' });
+    return ser.items.slice().reverse();
+  }
+
+  function metricas(s, opts) {
+    opts = opts || {};
+    const baseList = Array.isArray(opts.prospectos) ? opts.prospectos : ((s && s.prospectos) || []);
+    const rango = opts.periodo
+      ? (opts.periodo.startMs !== undefined ? opts.periodo : rangoPeriodo(opts.periodo))
+      : rangoPeriodo({ tipo: 'todo' });
+
+    const captadosList = filtrarPorPeriodo(baseList, rango, { campo: 'creado' });
+    const desembolsadosList = filtrarPorPeriodo(baseList, rango, { campo: 'desembolso' });
+
     const porEstado = Object.fromEntries(ESTADOS.map((e) => [e, 0]));
     const porSucursal = {};
     const porPromotor = {};
+    const porGestor = {};
+    const porAgenteCC = {};
     const porTipoCredito = {};
     const porPlataforma = {};
     const ccDirecto = {
@@ -1271,28 +1698,45 @@
       porSucursal: {},
       porAgente: {},
     };
-    s.prospectos.forEach((p) => {
-      porEstado[p.estado]++;
+
+    const ensureSuc = (suc) => (porSucursal[suc] = porSucursal[suc] || { total: 0, desembolsado: 0, monto: 0 });
+    const ensureProm = (p) => {
+      const uOrig = s && s.usuarios ? user(s, p.promotor_origen_id) : null;
+      const sucOrig = p.sucursal_origen || (uOrig && uOrig.sucursal) || p.sucursal;
+      return (porPromotor[p.promotor_origen_id] = porPromotor[p.promotor_origen_id] || { nombre: p.promotor_nombre, sucursal: sucOrig, total: 0, desembolsado: 0, monto: 0 });
+    };
+    const ensureGes = (gestorId, fallbackSuc) => {
+      if (!gestorId) return null;
+      const uG = s && s.usuarios ? user(s, gestorId) : null;
+      return (porGestor[gestorId] = porGestor[gestorId] || { nombre: uG ? uG.nombre : gestorId, sucursal: (uG && uG.sucursal) || fallbackSuc || '', total: 0, desembolsado: 0, monto: 0 });
+    };
+    const ensureAgCC = (agNombre) => (porAgenteCC[agNombre] = porAgenteCC[agNombre] || { nombre: agNombre, gestionados: 0, pescados: 0, directos: 0, desembolsados: 0, descartados: 0, monto: 0, _seen: new Set() });
+
+    let calificados = 0;
+    let montoSolicitado = 0;
+
+    // 1. Captación & Pipeline within the selected period
+    captadosList.forEach((p) => {
+      porEstado[p.estado] = (porEstado[p.estado] || 0) + 1;
       const tc = p.tipoCredito || 'NV(NUEVO)';
       porTipoCredito[tc] = (porTipoCredito[tc] || 0) + 1;
       const pl = p.plataforma || 'Cambaceo / Campo';
       porPlataforma[pl] = (porPlataforma[pl] || 0) + 1;
-      const ps = (porSucursal[p.sucursal] = porSucursal[p.sucursal] || { total: 0, desembolsado: 0, monto: 0 });
+      montoSolicitado += Number((p.cc && p.cc.monto) || p.monto || 0);
+
+      const ps = ensureSuc(p.sucursal);
       ps.total++;
-      const mDes = p.estado === 'desembolsado' ? Number((p.desembolso && p.desembolso.monto) || 0) : 0;
-      if (p.estado === 'desembolsado') {
-        ps.desembolsado++; ps.monto += mDes;
+
+      if (p.gestorId) {
+        const pg = ensureGes(p.gestorId, p.sucursal);
+        if (pg) pg.total++;
       }
 
       if (esCallCenterDirecto(p)) {
         ccDirecto.total++;
-        ccDirecto.porEstado[p.estado]++;
+        ccDirecto.porEstado[p.estado] = (ccDirecto.porEstado[p.estado] || 0) + 1;
         if (p.estado === 'pescado') ccDirecto.sinDistribuir++;
         if (p.gerencia || p.asignadoPromotorId || p.gestorId) ccDirecto.distribuidos++;
-        if (p.estado === 'desembolsado') {
-          ccDirecto.desembolsados++;
-          ccDirecto.montoDesembolsado += mDes;
-        }
         if (p.estado === 'descartado') ccDirecto.descartados++;
         if (p.sheetSync && p.sheetSync.status === 'synced') ccDirecto.sincronizadosSheet++;
         else ccDirecto.pendientesSheet++;
@@ -1301,27 +1745,135 @@
         cs.total++;
         if (p.estado === 'pescado') cs.pendientes++;
         if (p.estado === 'seguimiento') cs.seguimiento++;
-        if (p.estado === 'desembolsado') { cs.desembolsado++; cs.monto += mDes; }
         if (p.estado === 'descartado') cs.descartado++;
 
         const agNombre = (p.cc && p.cc.agente) || 'Call Center';
         const ca = (ccDirecto.porAgente[agNombre] = ccDirecto.porAgente[agNombre] || { nombre: agNombre, total: 0, seguimiento: 0, desembolsado: 0, descartado: 0, monto: 0 });
         ca.total++;
         if (p.estado === 'seguimiento') ca.seguimiento++;
-        if (p.estado === 'desembolsado') { ca.desembolsado++; ca.monto += mDes; }
         if (p.estado === 'descartado') ca.descartado++;
+
+        const agc = ensureAgCC(agNombre);
+        agc.directos++;
+        if (!agc._seen.has(p.id)) { agc._seen.add(p.id); agc.gestionados++; }
+        if (p.estado === 'descartado') agc.descartados++;
       } else {
-        const uOrig = user(s, p.promotor_origen_id);
-        const sucOrig = p.sucursal_origen || (uOrig && uOrig.sucursal) || p.sucursal;
-        const pp = (porPromotor[p.promotor_origen_id] = porPromotor[p.promotor_origen_id] || { nombre: p.promotor_nombre, sucursal: sucOrig, total: 0, desembolsado: 0, monto: 0 });
+        const pp = ensureProm(p);
         pp.total++;
-        if (p.estado === 'desembolsado') {
-          pp.desembolsado++; pp.monto += mDes;
+        if (p.cc && p.cc.agente) {
+          const agc = ensureAgCC(p.cc.agente);
+          if (!agc._seen.has(p.id)) { agc._seen.add(p.id); agc.gestionados++; }
+          if (p.estado === 'descartado') agc.descartados++;
         }
       }
     });
-    const total = s.prospectos.length;
-    return { total, porEstado, porSucursal, porPromotor, porTipoCredito, porPlataforma, callCenterDirecto: ccDirecto, conversion: total ? Math.round((porEstado.desembolsado / total) * 100) : 0 };
+
+    // 2. Call Center qualification activity within the period (tracks calificados even if lead was created earlier)
+    baseList.forEach((p) => {
+      if (!p) return;
+      const fCal = fechaCalificado(p) || (esCallCenterDirecto(p) ? p.creado : '');
+      if (fCal && enRango(fCal, rango)) {
+        calificados++;
+        const agNombre = (p.cc && p.cc.agente) || (esCallCenterDirecto(p) ? 'Call Center' : '');
+        if (agNombre) {
+          const agc = ensureAgCC(agNombre);
+          if (!esCallCenterDirecto(p)) agc.pescados++;
+          if (!agc._seen.has(p.id)) { agc._seen.add(p.id); agc.gestionados++; }
+        }
+      }
+    });
+
+    // 3. Disbursements closed in the period (by desembolso.fecha so monthly placement goals are exact on the 1st)
+    let desembolsados = 0;
+    let montoColocado = 0;
+    let desembolsosArrastre = 0;
+    desembolsadosList.forEach((p) => {
+      const mDes = Number((p.desembolso && p.desembolso.monto) || (p.cc && p.cc.monto) || p.monto || 0);
+      desembolsados++;
+      montoColocado += mDes;
+      if (!enRango(p.creado, rango)) desembolsosArrastre++;
+
+      const ps = ensureSuc(p.sucursal);
+      ps.desembolsado++;
+      ps.monto += mDes;
+
+      if (p.gestorId) {
+        const pg = ensureGes(p.gestorId, p.sucursal);
+        if (pg) { pg.desembolsado++; pg.monto += mDes; }
+      }
+
+      if (esCallCenterDirecto(p)) {
+        ccDirecto.desembolsados++;
+        ccDirecto.montoDesembolsado += mDes;
+        const cs = (ccDirecto.porSucursal[p.sucursal] = ccDirecto.porSucursal[p.sucursal] || { total: 0, pendientes: 0, seguimiento: 0, desembolsado: 0, descartado: 0, monto: 0 });
+        cs.desembolsado++;
+        cs.monto += mDes;
+        const agNombre = (p.cc && p.cc.agente) || 'Call Center';
+        const ca = (ccDirecto.porAgente[agNombre] = ccDirecto.porAgente[agNombre] || { nombre: agNombre, total: 0, seguimiento: 0, desembolsado: 0, descartado: 0, monto: 0 });
+        ca.desembolsado++;
+        ca.monto += mDes;
+        const agc = ensureAgCC(agNombre);
+        agc.desembolsados++;
+        agc.monto += mDes;
+      } else {
+        const pp = ensureProm(p);
+        pp.desembolsado++;
+        pp.monto += mDes;
+        if (p.cc && p.cc.agente) {
+          const agc = ensureAgCC(p.cc.agente);
+          agc.desembolsados++;
+          agc.monto += mDes;
+        }
+      }
+    });
+
+    Object.values(porAgenteCC).forEach((x) => { delete x._seen; });
+
+    const total = captadosList.length;
+    const conversion = total ? Math.round((porEstado.desembolsado / total) * 100) : 0;
+    const tasaCierrePeriodo = total ? Math.min(100, Math.round((desembolsados / total) * 100)) : 0;
+
+    let comparativo = null;
+    if (opts.incluirComparativo && rango.anterior) {
+      const prev = metricas(s, { prospectos: baseList, periodo: rango.anterior, incluirComparativo: false });
+      comparativo = {
+        etiqueta: rango.anterior.etiqueta,
+        total: prev.total,
+        calificados: prev.calificados,
+        desembolsados: prev.desembolsados,
+        montoColocado: prev.montoColocado,
+        descartados: prev.porEstado.descartado || 0,
+        deltaTotal: total - prev.total,
+        deltaCalificados: calificados - prev.calificados,
+        deltaDesembolsados: desembolsados - prev.desembolsados,
+        deltaMonto: montoColocado - prev.montoColocado,
+      };
+    }
+
+    const res = {
+      total,
+      calificados,
+      desembolsados,
+      desembolsosArrastre,
+      montoSolicitado,
+      montoColocado,
+      porEstado,
+      porSucursal,
+      porPromotor,
+      porGestor,
+      porAgenteCC,
+      porTipoCredito,
+      porPlataforma,
+      callCenterDirecto: ccDirecto,
+      conversion,
+      tasaCierrePeriodo,
+      periodo: rango,
+      comparativo,
+    };
+    if (opts.granularidad) {
+      res.series = seriesTemporales(baseList, { periodo: rango, granularidad: opts.granularidad });
+    }
+    return res;
   }
 
   // ---------- seed ----------
@@ -1582,11 +2134,13 @@
   }
 
   return {
-    ROLES, ESTADOS, PASO, ORIGEN_CC_ID, ORIGEN_CC_NOMBRE, CAMPOS_EDITABLES, setClock, defaultConfig, soloDigitos, normCedula, validarTelefono, fill,
+    ROLES, ESTADOS, PASO, ORIGEN_CC_ID, ORIGEN_CC_NOMBRE, CAMPOS_EDITABLES, TZ_OFFSET_MS, setClock, defaultConfig, soloDigitos, normCedula, validarTelefono, fill,
     sinAcentos, normUser, esCallCenterDirecto, limpiarTelefonoCC, parseMonto, normalizarSucursal, sucursalParaSheet,
     hashPwd, hashPwdScrypt, makePasswordHash, verifyPwd, genUsername, genPassword, autenticar, cambiarPassword,
     puedeVer, visibles, transiciones, buscarDuplicado, mensajeDuplicado, crearProspecto, capturarProspectoCallCenter, capturarCasoCallCenterDirecto,
     categorizarTelefonoCSV, resolverPromotorCSV, clasificarFilasCSV, importarFilasCSV,
-    cambiarEstado, agregarNota, adminEditarProspecto, guardarUsuario, toggleUsuario, guardarConfig, marcarLeidas, metricas, gerentesDe, seed, upgradeState,
+    cambiarEstado, agregarNota, adminEditarProspecto, guardarUsuario, toggleUsuario, guardarConfig, marcarLeidas,
+    fechaClave, mesClave, semanaClave, fechaDesembolso, fechaCalificado, fechaAsignado, rangoPeriodo, enRango, filtrarPorPeriodo, pendientesAnteriores, mesesDisponibles, seriesTemporales, resumenMensual,
+    metricas, gerentesDe, seed, upgradeState,
   };
 });
