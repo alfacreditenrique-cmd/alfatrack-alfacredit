@@ -747,3 +747,34 @@ test('SheetsBridge live HTTP protocol: RS256 JWT cryptographic verification + OA
     SheetsBridge.resetCaches();
   }
 });
+
+test('resilience under load: 10 concurrent simultaneous logins all succeed 200 OK and >4MB body returns 413', async () => {
+  const creds = [
+    ['admin', 'admin123'],
+    ['betsy.ruiz', 'betsy123'],
+    ['xochil.torrez', 'xochil123'],
+    ['eva.sevilla', 'eva123'],
+    ['gerente.managua', 'managua123'],
+    ['gerente.masaya', 'masaya123'],
+    ['gerente.sebaco', 'sebaco123'],
+    ['fanny.ramirez', 'fanny123'],
+    ['lester.rocha', 'lester123'],
+    ['diego.mendoza', 'diego123'],
+  ];
+  const results = await Promise.all(
+    creds.map(([username, password]) => api('/api/auth/login', { body: { username, password } }))
+  );
+  results.forEach((r, idx) => {
+    assert.strictEqual(r.status, 200, `concurrent login #${idx} (${creds[idx][0]}) failed with ${r.status}: ${JSON.stringify(r.data)}`);
+    assert.ok(r.data.ok && r.data.token);
+  });
+
+  // Oversized payload > 4 MB rejected cleanly with HTTP 413
+  const huge = 'x'.repeat(4 * 1024 * 1024 + 512);
+  const res413 = await fetch(baseUrl + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: huge }),
+  });
+  assert.strictEqual(res413.status, 413);
+});

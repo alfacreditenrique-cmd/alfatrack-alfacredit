@@ -38,6 +38,7 @@
   let knownProspects = new Map();
   let toastedNotifIds = new Set();
   let lastPollTs = 0;
+  let pollInFlight = false;
   let dupCheckSeq = 0;
   let lastDupAlertKey = '';
 
@@ -222,22 +223,39 @@
 
   async function apiFetch(url, opts) {
     opts = opts || {};
+    const timeoutMs = Number(opts.timeoutMs) || 15000;
     const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
     if (ui.token) headers.Authorization = 'Bearer ' + ui.token;
-    const res = await fetch(url, Object.assign({}, opts, { headers }));
-    let data = null;
-    try { data = await res.json(); } catch {}
-    if (res.status === 401 && ui.autenticado && !url.includes('/api/auth/login')) {
-      logoutSession(true);
-      toast('Tu sesión expiró. Inicia sesión nuevamente.', 'error');
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const fetchOpts = Object.assign({}, opts, { headers });
+      delete fetchOpts.timeoutMs;
+      if (controller) fetchOpts.signal = controller.signal;
+      const res = await fetch(url, fetchOpts);
+      let data = null;
+      try { data = await res.json(); } catch {}
+      if (res.status === 401 && ui.autenticado && !url.includes('/api/auth/login')) {
+        logoutSession(true);
+        toast('Tu sesión expiró. Inicia sesión nuevamente.', 'error');
+      }
+      return { res, data: data || { ok: false, error: `Error HTTP ${res.status}` } };
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        return { res: { ok: false, status: 408 }, data: { ok: false, error: 'Tiempo de espera agotado. Verifique su conexión e intente de nuevo.' } };
+      }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-    return { res, data: data || { ok: false, error: `Error HTTP ${res.status}` } };
   }
 
   async function checkHealth() {
     if (!isHttp()) return;
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 6000) : null;
     try {
-      const res = await fetch('/api/health');
+      const res = await fetch('/api/health', controller ? { signal: controller.signal } : undefined);
       if (res.ok) {
         const d = await res.json();
         ui.db.tursoConnected = Boolean(d && d.tursoConnected);
@@ -251,16 +269,22 @@
           if (dot) dot.textContent = ui.db.tursoConnected ? '🟢' : '🟡';
         }
       }
-    } catch {}
+    } catch {} finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async function pullFromCloud(forceRender, isPoll) {
     if (!isHttp() || !ui.autenticado || !ui.token) return false;
+    if (pollInFlight) return false;
     if (isPoll && Date.now() - lastPollTs < 2000) return false;
     lastPollTs = Date.now();
+    pollInFlight = true;
     try {
-      const { res, data } = await apiFetch('/api/state', { method: 'GET' });
+      const { res, data } = await apiFetch('/api/state', { method: 'GET', timeoutMs: isPoll ? 7000 : 12000 });
       if (!res.ok || !data || !data.ok || !data.state) return false;
+      // Ignore stale responses that arrive after a newer local mutation
+      if (isPoll && data.rev && ui.rev && Number(data.rev) < Number(ui.rev)) return false;
 
       const uPrev = me() || data.usuario;
       const incoming = C.upgradeState(data.state, { scoped: Boolean(data.state._scoped) });
@@ -316,6 +340,8 @@
       return true;
     } catch {
       return false;
+    } finally {
+      pollInFlight = false;
     }
   }
 
@@ -1852,7 +1878,7 @@
       const qs = new URLSearchParams();
       if (telOk) qs.set('telefono', telOk);
       if (cedOk) qs.set('cedula', cedOk);
-      const { res, data } = await apiFetch('/api/check-dup?' + qs.toString(), { method: 'GET' });
+      const { res, data } = await apiFetch('/api/check-dup?' + qs.toString(), { method: 'GET', timeoutMs: 6000 });
       if (seq !== dupCheckSeq) return;
       if (res.ok && data && data.ok && data.duplicate) {
         setFormDupState(form, data.duplicate.mensaje);
@@ -1923,18 +1949,23 @@
         toast('Estado de integración Call Center / Google Sheets actualizado.', 'info');
         break;
       case 'retry-sheet': {
+        if (el.disabled) break;
         el.disabled = true;
-        await mutate(
-          'reintentarSyncSheet',
-          { id },
-          () => ({ ok: false, error: 'La sincronización con Google Sheets requiere conexión al servidor.' }),
-          (res) => {
-            const ss = res && res.sheetSync;
-            if (ss && ss.ok) return `✅ Sincronizado con Google Sheets (fila #${ss.sheetRow}).`;
-            return (ss && ss.error) ? `⚠️ ${ss.error}` : 'Sincronización con Google Sheets intentada.';
-          },
-          { soundCue: 'admin_ok' }
-        );
+        try {
+          await mutate(
+            'reintentarSyncSheet',
+            { id },
+            () => ({ ok: false, error: 'La sincronización con Google Sheets requiere conexión al servidor.' }),
+            (res) => {
+              const ss = res && res.sheetSync;
+              if (ss && ss.ok) return `✅ Sincronizado con Google Sheets (fila #${ss.sheetRow}).`;
+              return (ss && ss.error) ? `⚠️ ${ss.error}` : 'Sincronización con Google Sheets intentada.';
+            },
+            { soundCue: 'admin_ok' }
+          );
+        } finally {
+          el.disabled = false;
+        }
         break;
       }
       case 'bell': ui.bell = !ui.bell; render(); break;
@@ -2253,6 +2284,9 @@
     const kind = f.dataset.form;
     if (!kind) return;
     e.preventDefault();
+    if (f.dataset.submitting === '1') return;
+    f.dataset.submitting = '1';
+    try {
     const d = Object.fromEntries(new FormData(f));
     const u = me();
 
@@ -2509,6 +2543,9 @@
         setFormBusy(f, false);
       }
     }
+    } finally {
+      delete f.dataset.submitting;
+    }
   });
 
   document.addEventListener('keydown', (e) => {
@@ -2558,7 +2595,7 @@
   });
 
   if ('serviceWorker' in navigator && isHttp()) {
-    navigator.serviceWorker.register('sw.js?v=10', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=11', { updateViaCache: 'none' }).then((reg) => { try { reg.update(); } catch {} }).catch(() => {});
   }
 
   render();

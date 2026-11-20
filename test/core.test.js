@@ -579,5 +579,29 @@ test('Call Center Directo adversarial edge cases: real dual phones, negative/dot
   assert.ok(ed.notificaciones.some((n) => /caso directo/i.test(n.texto)), 'new branch manager gets Call Center Directo notification template');
 });
 
+test('memory & payload bounds: auditoria and notificaciones cap at 500 while preserving unread notifications', () => {
+  const s = fresh();
+  const pro = U(s, 'u-pro-mas-fanny');
+  for (let i = 0; i < 515; i++) {
+    s.auditoria.push({ ts: new Date().toISOString(), userId: 'u-admin', usuario: 'Admin', rol: 'admin', accion: 'Old', detalle: String(i) });
+  }
+  C.autenticar(s, 'admin', 'admin123');
+  assert.ok(s.auditoria.length <= 500, `auditoria grew to ${s.auditoria.length}`);
+
+  // Flood read + unread notifications and verify cap <= 500 while unread survive
+  for (let i = 0; i < 520; i++) {
+    s.notificaciones.push({ id: `old-read-${i}`, userId: pro.id, texto: 'read', ts: new Date().toISOString(), leida: true, toasted: true });
+  }
+  const r = C.capturarCasoCallCenterDirecto(s, U(s, 'u-cc-betsy'), {
+    nombre: 'Notif Cap Test',
+    telefono: '87778899',
+    sucursal: 'Masaya',
+    monto: 10000,
+  });
+  assert.ok(r.ok);
+  assert.ok(s.notificaciones.length <= 500, `notificaciones grew to ${s.notificaciones.length}`);
+  assert.ok(s.notificaciones.some((n) => n.id === r.notificaciones[0].id), 'newest unread notification preserved');
+});
+
 
 

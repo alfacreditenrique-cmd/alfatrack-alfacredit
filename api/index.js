@@ -197,6 +197,7 @@ function scopeStateForUser(state, actor) {
   return {
     version: state.version,
     officialPromotersV2: state.officialPromotersV2,
+    realRosterV4: state.realRosterV4,
     _scoped: true,
     config: state.config,
     usuarios: state.usuarios.map((u) => sanitizeUser(u, false)),
@@ -232,15 +233,30 @@ function clearAuthCookie(res, req) {
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
+const MAX_BODY_BYTES = 4 * 1024 * 1024; // 4 MB guard against OOM/stalled uploads
+
 function readBody(req) {
   if (req.body && typeof req.body === 'object') return Promise.resolve(req.body);
   if (typeof req.body === 'string' && req.body.trim()) {
+    if (Buffer.byteLength(req.body, 'utf8') > MAX_BODY_BYTES) return Promise.resolve({ _tooLarge: true });
     try { return Promise.resolve(JSON.parse(req.body)); } catch { return Promise.resolve({}); }
   }
   return new Promise((resolve) => {
     let raw = '';
-    req.on('data', (chunk) => { raw += chunk; });
+    let size = 0;
+    let overflow = false;
+    req.on('data', (chunk) => {
+      if (overflow) return;
+      size += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk), 'utf8');
+      if (size > MAX_BODY_BYTES) {
+        overflow = true;
+        raw = '';
+        return;
+      }
+      raw += chunk;
+    });
     req.on('end', () => {
+      if (overflow) return resolve({ _tooLarge: true });
       if (!raw) return resolve({});
       try { resolve(JSON.parse(raw)); } catch { resolve({}); }
     });
@@ -255,9 +271,11 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+const waitJitter = (attempt) => new Promise((r) => setTimeout(r, Math.min(260, 35 * (attempt + 1) + Math.floor(Math.random() * 65))));
+
 async function runAtomicMutation(mutatorFn) {
   return withWriteLock(async () => {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 7; attempt++) {
       const { state, rev } = await DB.getState();
       const out = await mutatorFn(state, rev);
       if (!out || !out.ok) return out;
@@ -268,7 +286,10 @@ async function runAtomicMutation(mutatorFn) {
         delta: out.fullSync ? null : out.delta,
         expectedRev: rev,
       });
-      if (syncInfo && syncInfo.conflict) continue;
+      if (syncInfo && syncInfo.conflict) {
+        await waitJitter(attempt);
+        continue;
+      }
       return Object.assign({}, out, {
         state,
         tursoSynced: Boolean(syncInfo && syncInfo.tursoSynced),
@@ -299,7 +320,8 @@ module.exports = async function handler(req, res) {
     // 2. Authenticate user with username & password -> returns HMAC-SHA256 signed session token + role-scoped state
     if (pathname === '/api/auth/login' && method === 'POST') {
       const body = await readBody(req);
-      const out = await runAtomicMutation((state) => {
+      if (body && body._tooLarge) return sendJson(res, 413, { ok: false, error: 'Solicitud demasiado grande.' });
+      let out = await runAtomicMutation((state) => {
         const auth = Core.autenticar(state, body.username, body.password);
         if (!auth.ok) return { ok: false, status: 401, error: auth.error };
         return {
@@ -311,6 +333,14 @@ module.exports = async function handler(req, res) {
           },
         };
       });
+      // Never block valid user logins if concurrent login storm causes CAS conflict on ultimoAcceso/audit write
+      if (!out.ok && out.status === 409) {
+        const { state, rev } = await DB.getState();
+        const auth = Core.autenticar(state, body.username, body.password);
+        if (auth.ok) {
+          out = { ok: true, usuario: auth.usuario, state, rev };
+        }
+      }
       if (!out.ok) return sendJson(res, out.status || 401, { ok: false, error: out.error });
       const token = signToken(out.usuario);
       setAuthCookie(res, req, token);
@@ -391,6 +421,7 @@ module.exports = async function handler(req, res) {
     // 5. Atomic domain mutation persisted to Turso Cloud SQLite (authenticated; actor strictly from signed token)
     if (pathname === '/api/mutate' && method === 'POST') {
       const body = await readBody(req);
+      if (body && body._tooLarge) return sendJson(res, 413, { ok: false, error: 'La solicitud excede el límite de 4 MB.' });
       const { action, payload } = body || {};
 
       if (action === 'reset') {
@@ -598,6 +629,7 @@ module.exports = async function handler(req, res) {
     // 5b. Integration: Ingest new Call Center credit lead from Python Call Center app (idempotent, no Google Sheet echo)
     if (pathname === '/api/integrations/callcenter/ingest' && method === 'POST') {
       const body = await readBody(req);
+      if (body && body._tooLarge) return sendJson(res, 413, { ok: false, error: 'Solicitud demasiado grande.' });
       const hasValidKey = verifyIntegrationKey(req);
       const out = await runAtomicMutation((state) => {
         const authActor = authenticateActor(req, state);

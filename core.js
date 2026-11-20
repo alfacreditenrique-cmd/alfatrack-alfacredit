@@ -261,6 +261,9 @@
     return first + '123';
   }
 
+  const MAX_AUDIT = 500;
+  const MAX_NOTIFS = 500;
+
   function log(p, actor, accion, detalle) {
     p.historial.push({ ts: now(), userId: actor.id, usuario: actor.nombre, rol: actor.rol, accion, detalle: detalle || '' });
   }
@@ -273,6 +276,9 @@
       accion,
       detalle: detalle || '',
     });
+    if (s.auditoria.length > MAX_AUDIT) {
+      s.auditoria.splice(0, s.auditoria.length - MAX_AUDIT);
+    }
   }
   function notificar(s, userIds, texto, prospectoId) {
     const out = [];
@@ -281,6 +287,13 @@
       s.notificaciones.push(n);
       out.push(n);
     });
+    if (s.notificaciones.length > MAX_NOTIFS) {
+      // Preserve unread notifications first, then newest read ones
+      const unread = s.notificaciones.filter((n) => !n.leida);
+      const read = s.notificaciones.filter((n) => n.leida);
+      const keepRead = Math.max(0, MAX_NOTIFS - unread.length);
+      s.notificaciones = unread.slice(-MAX_NOTIFS).concat(keepRead ? read.slice(-keepRead) : []);
+    }
     return out;
   }
   function vars(s, p, actor, extra) {

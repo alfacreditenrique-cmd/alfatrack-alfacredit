@@ -128,11 +128,14 @@ function parseTursoResult(execResult) {
 }
 
 let schemaInitialized = false;
+let schemaInitPromise = null;
 
 async function ensureSchema() {
   const cfg = getTursoConfig();
   if (!cfg.enabled || schemaInitialized) return;
-  const ddl = [
+  if (schemaInitPromise) return schemaInitPromise;
+  schemaInitPromise = (async () => {
+    const ddl = [
     `CREATE TABLE IF NOT EXISTS alfatrack_state (
       id TEXT PRIMARY KEY,
       version INTEGER NOT NULL DEFAULT 1,
@@ -236,8 +239,12 @@ async function ensureSchema() {
       return ar;
     }
   }
-  schemaInitialized = true;
-  return r;
+    schemaInitialized = true;
+    return r;
+  })().finally(() => {
+    schemaInitPromise = null;
+  });
+  return schemaInitPromise;
 }
 
 const upgradeState = Core.upgradeState;
